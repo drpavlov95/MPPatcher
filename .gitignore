@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+
+# Runtime logs and local reports
+*.log
+importtime.log
+drape_test_filter.txt
+
+# Local/experimental workspaces and generated verification output
+.tmp_*/
+tmp*/
+_*_verify*/
+_verify*/
+_autozap*/
+_diag_*/
+_maid_*/
+drape_test_output*/
+autozap/
+AUTOZAP_*.md
+tests/fixtures/
+tests/test_outfit_scanner_fixtures.py
+
+# Generated/runtime assets
+*.bak
+*.exe
+*.zip
+*.drcap
+*.npy
+*.ply
+*.png
+
+# IDE and OS files
+.idea/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
