@@ -70,6 +70,78 @@ MPPatcher does not overwrite the source `.osp`, NIF, or OSD files during the
 normal public workflow. The generated output is intended to be installed as a
 separate mod.
 
+## Understanding the controls
+
+### Review columns
+
+The review table is deliberately conservative. If MPPatcher cannot identify a
+supported body reference, gender, project, or mesh part, it marks the outfit
+for review instead of silently guessing. The supported body references are
+currently **3BA** and **HIMBO**; the supported mesh parts are **Body**,
+**Hands**, and **Feet**.
+
+- **Body Reference** identifies which MPP reference should drive the morph
+  generation. Check this when a project uses unusual naming or contains more
+  than one body family.
+- **Mesh Part** selects the reference geometry for the outfit. MPPatcher can
+  detect Body, Hands, and Feet automatically, but you can correct an uncertain
+  result during review.
+- **Output Reference** controls the embedded reference in the generated
+  project:
+  - **Leave as Original** keeps the source project's reference state and is the
+    normal choice.
+  - **Remove Reference** creates output without embedded body geometry when the
+    source contains a reference.
+  - **Force Reference** embeds the matching MPP reference when the source is
+    reference-less.
+- **Revealing** chooses between two body morph styles for each outfit:
+  - **Covered** is smoother and is recommended for clothing or armor that hides
+    most of the body. It reduces the chance of visible conforming artifacts
+    underneath the outfit.
+  - **Revealing** uses the detailed body morph and preserves features such as
+    skin folds, navel definition, and cellulite. Enable it for outfits with
+    substantial exposed skin. It is independent of Auto-Zap.
+- **Smart refit** replaces the normal conform for that outfit with Drape's
+  distance-weighted refit, solving the outfit as a whole against the morphed
+  body. It is most useful for loose or difficult garments such as long skirts,
+  robes, and capes. It runs once per RM slider and can take roughly a minute
+  per slider, so enable it only for the outfits that need it. Smart refit is
+  **ALPHA** and can produce a worse result on some meshes; always inspect the
+  output before deploying it.
+
+### Patching options
+
+- **Auto-Zap** generates a `Fix Clipping` Zap slider in the output. The slider
+  is intended to hide body geometry that would intersect the outfit. Auto-Zap
+  changes the generated output only; it does not edit the source project. It
+  is useful as a first pass for clipping, but the result should still be
+  checked in BodySlide or in-game.
+- **Reduce clipping** runs BodySlide/Outfit Studio's native Fix Clipping pass
+  on the generated RM sliders. It is a different operation from Auto-Zap:
+  Auto-Zap hides selected body geometry, while Fix Clipping adjusts the
+  generated morph data. It can reduce intersections but may deform the mesh.
+- **Fix Clipping strength** controls the native pass from `0.00` to `1.00`.
+  The default is `0.50`; higher values are more aggressive and have a greater
+  chance of visible deformation. Leave Reduce clipping disabled when preserving
+  the original outfit shape is more important than removing every intersection.
+
+### Output mode
+
+The **Output** control has two modes:
+
+- **Loose files** writes a normal mod folder. Use this when you want to inspect
+  the generated files, compare iterations, or point an MO2 mod directly at the
+  output directory.
+- **ZIP archive** creates a ready-to-install mod archive with the correct
+  relative paths. Use this for sharing, archiving, or installing the result as
+  a new MO2 mod.
+
+Always choose an output location separate from the source BodySlide data. A
+good first run is one outfit, **Loose files**, Auto-Zap enabled, Smart refit
+disabled, and Reduce clipping disabled. After checking the result, enable the
+more expensive or more aggressive options only for the outfits that benefit
+from them.
+
 ## Headparts mode
 
 The GUI can patch a folder or ZIP containing headpart `.tri` files. It finds
