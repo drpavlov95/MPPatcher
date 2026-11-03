@@ -167,9 +167,46 @@ Run the test suite with:
 python -m unittest discover -s tests -v
 ```
 
-The included `MPPatcher.spec` can be used with PyInstaller. Build artifacts
-and local diagnostic data are intentionally ignored by Git; releases should
-be distributed separately from the source checkout.
+## How to compile
+
+MPPatcher is packaged as a Windows executable with
+[PyInstaller](https://pyinstaller.org/). The repository includes the
+`MPPatcher.spec` file used by the build.
+
+From the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install pyinstaller
+pyinstaller --clean --noconfirm MPPatcher.spec
+```
+
+The executable is created at:
+
+```text
+dist\MPPatcher.exe
+```
+
+The spec is intentionally portable and does not require a machine-specific
+icon path. Build artifacts are ignored by Git, so `build/` and `dist/` can be
+deleted or rebuilt at any time.
+
+The native `mppatcher-cli.exe` and the optional `MPPatcher-Drape` runtime are
+separate components. They must be supplied beside the packaged application
+when using the outfit patching or Smart refit workflows; this Python build does
+not compile those native components.
+
+For a quick source validation without producing an executable:
+
+```powershell
+python -m compileall -q core fmp ui tests tools mppatcher.py
+```
+
+Build artifacts and local diagnostic data are intentionally ignored by Git;
+releases should be distributed separately from the source checkout.
 
 ## Troubleshooting
 
