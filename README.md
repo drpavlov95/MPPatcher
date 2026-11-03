@@ -1,51 +1,115 @@
 # MPPatcher
 
-MPPatcher is an open-source helper for Skyrim BodySlide/Outfit Studio
-workflows. It provides a Qt desktop interface for scanning outfits, selecting
-patch targets, creating safe output folders or ZIP archives, and transferring
-Physiques of Skyrim morphs to TRI headparts.
+MPPatcher is an open-source helper for Skyrim BodySlide and Outfit Studio
+workflows. It scans BodySlide projects, helps you review outfit compatibility,
+and creates a separate mod-ready output with the selected morph patches.
 
-The Python application is the user interface and orchestration layer. The
-native BodySlide patching CLI and optional Drape runtime are separate
-components and are discovered from the BodySlide installation at runtime.
+It also includes a Headparts mode for transferring Physiques of Skyrim morphs
+to `.tri` files used by hair, brows, beards, and other headparts.
+
+> **Project status:** the Python GUI and orchestration layer are open source.
+> The native BodySlide patching CLI and the optional Drape runtime are separate
+> components and are discovered from the BodySlide installation at runtime.
+
+## Features
+
+- BodySlide outfit scanning with body-family, gender, and body-part detection.
+- Reviewable selection flow with explicit confirmation for uncertain projects.
+- Optional Auto-Zap clipping slider generation.
+- Optional Drape Smart refit (ALPHA; slower and not guaranteed to improve every mesh).
+- Headparts/TRI morph transfer for Physiques of Skyrim.
+- Output as an isolated folder or a mod-ready ZIP archive.
+- Backups and source-preserving output workflow.
 
 ## Requirements
 
 - Windows 10 or newer
-- Python 3.11+
-- PySide6
-- BodySlide/Outfit Studio and Mod Organizer 2 for the integrated workflow
+- Python 3.11 or newer
+- [PySide6](https://pypi.org/project/PySide6/)
+- BodySlide/Outfit Studio for outfit patching
+- Mod Organizer 2 when using the virtual file system workflow
+- The matching native `mppatcher-cli` component for the outfit pipeline
 
-Install the Python dependency with:
+## Install from source
+
+Clone the repository, create a virtual environment, and install the Python
+dependency:
 
 ```powershell
+git clone https://github.com/drpavlov95/MPPatcher.git
+cd MPPatcher
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-Run the application from the repository root:
+Run the GUI from the repository root:
 
 ```powershell
 python mppatcher.py
 ```
 
-Run the test suite:
+For normal outfit patching, install the native CLI where BodySlide can discover
+it. For Smart refit, place the bundled `MPPatcher-Drape` runtime beside the
+MPPatcher executable, or set `MPP_DRAPE_ROOT` and `MPP_DRAPE_PYTHON` for a
+development checkout.
+
+## Basic workflow
+
+1. Start MPPatcher from the same BodySlide/MO2 environment used by the source
+   projects.
+2. Select **Outfits** and choose the BodySlide source tree.
+3. Review the detected groups and outfit statuses.
+4. Resolve any rows marked for confirmation, then select the outfits to patch.
+5. Enable Auto-Zap, Revealing, or Smart refit only where needed.
+6. Choose a new output folder or ZIP file and start the patch.
+7. Install or test the generated output in a separate MO2 profile before using
+   it in a live load order.
+
+MPPatcher does not overwrite the source `.osp`, NIF, or OSD files during the
+normal public workflow. The generated output is intended to be installed as a
+separate mod.
+
+## Headparts mode
+
+The GUI can patch a folder or ZIP containing headpart `.tri` files. It finds
+the female and male Physiques of Skyrim references from the active Data/VFS
+tree and transfers `RLY_Heavy`, `RLY_Muscular`, and `RLY_Thin`.
+
+The same operation is available from the command line:
+
+```powershell
+python mppatcher.py --headparts `
+  --source "C:\path\to\headparts.zip" `
+  --output-dir "C:\path\to\patched-headparts"
+```
+
+Useful options include `--only-missing`, `--female-ref`, `--male-ref`, and
+`--filter-file`.
+
+## Development
+
+Run the test suite with:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-## Packaging
-
 The included `MPPatcher.spec` can be used with PyInstaller. Build artifacts
-are intentionally ignored by Git; releases should be published separately
-from the source repository.
+and local diagnostic data are intentionally ignored by Git; releases should
+be distributed separately from the source checkout.
 
-## Scope and safety
+## Troubleshooting
 
-MPPatcher writes to a user-selected output location and keeps source projects
-read-only during the normal patch workflow. Always test generated output in a
-separate MO2 profile before deploying it to a live setup.
+- **No BodySlide projects found:** verify the BodySlide root and launch context,
+  especially when using MO2's virtual file system.
+- **Native CLI not found:** confirm that the matching `mppatcher-cli` executable
+  is installed beside the BodySlide files visible to MPPatcher.
+- **Smart refit unavailable:** install the `MPPatcher-Drape` runtime or set both
+  `MPP_DRAPE_ROOT` and `MPP_DRAPE_PYTHON` in the development environment.
+- **Unexpected output:** test one outfit first and inspect the generated folder
+  before deploying the full batch.
 
 ## License
 
-MPPatcher is released under the MIT License. See [LICENSE](LICENSE).
+MPPatcher is released under the [MIT License](LICENSE).
