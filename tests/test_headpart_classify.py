@@ -114,9 +114,18 @@ class PathAndFilenameTests(unittest.TestCase):
         found = classify("meshes\\hair\\argonianmalehorns04hairline.nif")
         self.assertEqual((found.sex, found.sex_source), ("male", "filename"))
 
-    def test_the_path_is_tested_before_the_filename(self):
+    def test_every_female_signal_is_tested_before_any_male_one(self):
+        # Across both sources, not within each. An earlier version tested the
+        # directory first and the filename second, which read
+        # "meshes/male/femalehair01.nif" as male — a dead key — where the rule
+        # it replaced read it as female. When the two disagree neither is
+        # authoritative, so the tie goes to the older answer.
         found = classify("meshes\\hair\\male\\femaleish.nif")
-        self.assertEqual(found.sex_source, "path")
+        self.assertEqual((found.sex, found.sex_source), ("female", "filename"))
+
+    def test_the_directory_decides_when_the_filename_says_nothing(self):
+        found = classify("meshes\\hair\\male\\hair01.nif")
+        self.assertEqual((found.sex, found.sex_source), ("male", "path"))
 
     def test_a_space_separated_pair_resolves_when_the_opposite_file_exists(self):
         stems = collect_stems(["gortash_hair F.nif", "gortash_hair M.nif"])
@@ -147,6 +156,55 @@ class PathAndFilenameTests(unittest.TestCase):
         found = classify("meshes\\hair\\female\\acerola.nif", hdpt=None)
         self.assertEqual((found.sex, found.sex_source), ("female", "path"))
         self.assertNotEqual(found.sex_source, "plugin")
+
+
+class LegacyConventionTests(unittest.TestCase):
+    """Conventions the pre-2026-11-06 rule accepted, measured and kept.
+
+    The old TRI-mode rule took `f_`/`m_` prefixes and `_f`/`_m` suffixes with no
+    counterpart required. Replacing it wholesale with the pairing rule would
+    have skipped a female-only mod naming its files `hair_f.tri` — the same
+    class of loss the pairing rule was added to fix, for a different spelling.
+    """
+
+    def test_an_underscore_prefix_resolves_on_its_own(self):
+        self.assertEqual(classify("hair/f_longbraid.nif").sex, "female")
+        self.assertEqual(classify("hair/m_longbraid.nif").sex, "male")
+
+    def test_an_underscore_suffix_resolves_without_a_counterpart(self):
+        self.assertEqual(classify("hair/braid_f.nif").sex, "female")
+        self.assertEqual(classify("hair/braid_m.nif").sex, "male")
+
+    def test_a_filename_saying_female_beats_a_male_directory(self):
+        # The old rule tested the filename first and read this as female.
+        # Testing the directory first flipped it to male — a dead key.
+        found = classify("meshes/male/femalehair01.nif")
+        self.assertEqual(found.sex, "female")
+
+    def test_a_male_filename_in_a_female_directory_is_female(self):
+        # The mirror case. Neither source is authoritative, so the rule is the
+        # one it has always been: female wins the tie, because a wrong male key
+        # is as dead as a wrong female one and this is the older behaviour.
+        self.assertEqual(classify("meshes/female/malehair01.nif").sex, "female")
+
+    def test_a_bare_directory_still_decides_when_the_name_is_silent(self):
+        self.assertEqual(classify("meshes/male/hair01.nif").sex, "male")
+
+
+class AmbiguousRecordTests(unittest.TestCase):
+    def test_a_both_sex_record_beside_a_single_sex_one_is_unresolved(self):
+        # Minor 6 of the review, re-graded: this used to resolve "female" with
+        # sex_source "plugin" — plugin-grade confidence for a decision the
+        # plugin did not make — and the male side silently got no set.
+        hdpt = _index(_record("meshes\\h.nif", female=True),
+                      _record("meshes\\h.nif", female=True, male=True))
+        found = classify("meshes\\h.nif", hdpt=hdpt)
+        self.assertEqual((found.sex, found.sex_source), (None, "unresolved"))
+
+    def test_two_records_agreeing_on_one_sex_still_resolve(self):
+        hdpt = _index(_record("meshes\\h.nif", female=True),
+                      _record("meshes\\h.nif", female=True))
+        self.assertEqual(classify("meshes\\h.nif", hdpt=hdpt).sex, "female")
 
 
 class RealModShapeTests(unittest.TestCase):

@@ -129,11 +129,35 @@ class ScanRowsTests(unittest.TestCase):
             rows = scan_rows(folder, default_part="hair")
             self.assertNotEqual(rows[0].sex_source, "plugin")
 
-    def test_a_mod_whose_meshes_are_all_in_a_bsa_reports_the_archive(self):
+    def test_a_mod_whose_meshes_are_all_in_a_bsa_still_has_rows(self):
+        # Beards of Power keeps all 181 of its meshes inside one archive. With
+        # only loose NIFs listed, the GUI tree was empty and the Start button
+        # refused the run — making the archive path CLI-only.
         with tempfile.TemporaryDirectory() as folder:
             _make(folder, "Beards.bsa", "Beards.esp")
             rows = scan_rows(folder, default_part="facialhair")
-            self.assertEqual(rows, [])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].kind, "archive")
+            self.assertEqual(os.path.basename(rows[0].relpath), "Beards.bsa")
+
+    def test_an_archive_row_says_its_contents_are_read_during_the_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "Beards.bsa")
+            row = scan_rows(folder, default_part="facialhair")[0]
+            self.assertIsNone(row.sex)
+            self.assertTrue(row.warnings)
+            self.assertIn("archive", " ".join(row.warnings).lower())
+
+    def test_mesh_rows_are_listed_before_archive_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "Extra.bsa", "meshes/hair/female/a.nif")
+            kinds = [row.kind for row in scan_rows(folder)]
+            self.assertEqual(kinds, ["mesh", "archive"])
+
+    def test_a_mesh_row_is_marked_as_one(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/female/a.nif")
+            self.assertEqual(scan_rows(folder)[0].kind, "mesh")
 
     def test_the_relpath_is_kept_as_the_row_name(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -26,7 +26,7 @@ import numpy as np
 
 from fmp.morphs import find_morph, make_morph
 from fmp.report import FileResult, RunReport
-from fmp.tri import TriFile, read_tri, write_tri
+from fmp.tri import TriError, TriFile, read_tri, write_tri
 
 # Where the plugin reads its library from, relative to Data. The output is a mod
 # folder the user can enable directly.
@@ -131,13 +131,18 @@ class FrameChoice:
     surface: np.ndarray
     name: str
     median_distance: float
-    # Where the shape comes closest to the head: the 5th percentile of its
-    # vertex distances, in the chosen frame. A headpart is attached to the head
-    # somewhere, so this is near zero for one — measured across 240 real shapes,
-    # 234 contact within 1.0 unit. The six that do not sit at 14.5 to 31.4, with
-    # nothing in between, and for those the frame choice is close to a coin flip
-    # because neither frame puts them against the skin. This is the number that
-    # says so.
+    # Where the shape comes closest to the head, in the chosen frame: the
+    # distance of its single nearest sampled vertex. A headpart is attached to
+    # the head somewhere, so this is near zero for one — measured across 240
+    # real shapes, 234 contact within 1.0 unit. The six that do not sit at 14.5
+    # to 31.4, with nothing in between, and for those the frame choice is close
+    # to a coin flip because neither frame puts them against the skin.
+    #
+    # The minimum, not a percentile. A long braid with a dozen root vertices on
+    # the scalp and three hundred hanging below has a 5th percentile far from
+    # the head while its roots are touching it — and those roots take the full
+    # delta. Reading a percentile as "the closest vertices" dropped exactly that
+    # shape, at the hairline, where the loss shows most.
     contact_distance: float = 0.0
 
 
@@ -148,6 +153,11 @@ class VerifyResult:
     matched: int
     unmatched: list[str]
     worst_distance: float
+    # Shapes whose best match in the library is some *other* shape's set. They
+    # would still be morphed, by a field authored for a different mesh, so this
+    # is a defect of its own rather than a flavour of unmatched.
+    wrong_set: list[str] = field(default_factory=list)
+    source: str = "memory"
 
 
 def centred_mean_distance(a: np.ndarray, b: np.ndarray) -> float:
@@ -222,8 +232,7 @@ def pick_frame(ref: HeadReference, verts: np.ndarray, *,
             continue
         median = float(np.median(dist))
         if median < best.median_distance:
-            best = FrameChoice(surface, name, median,
-                               float(np.percentile(dist, 5)))
+            best = FrameChoice(surface, name, median, float(dist.min()))
     return best
 
 
@@ -287,11 +296,20 @@ def build_set(ref: HeadReference, cluster: GeometryCluster, *,
         tri.morphs.append(make_morph(name, deltas))
         if name == MORPHS[0]:
             metrics.update(measured)
+        # The weakest of the three is what says whether this set does anything
+        # at all: a set of zeros matches every shape and applies nothing.
+        metrics["delta_max_min"] = min(
+            metrics.get("delta_max_min", float("inf")),
+            float(measured.get("delta_max", 0.0)))
 
     data = write_tri(tri)
     # Read it straight back. A file MPF cannot parse is worse than no file, and
     # the reader here implements the same layout as the plugin's.
-    check = read_tri(data, source=f"{cluster.representative} set")
+    try:
+        check = read_tri(data, source=f"{cluster.representative} set")
+    except TriError as exc:
+        raise ValueError(f"set for {cluster.representative} "
+                         f"cannot be read back: {exc}") from exc
     if check.vertex_count != len(cluster.verts):
         raise ValueError(
             f"set for {cluster.representative} read back with "
@@ -338,13 +356,13 @@ def cluster_geometries(shapes: list[ShapeInput],
         for shape in buckets[key]:
             for cluster in clusters:
                 if centred_mean_distance(shape.verts, cluster.verts) < limit:
-                    cluster.members.append(shape.relpath)
+                    cluster.members.append(shape.label)
                     break
             else:
                 clusters.append(GeometryCluster(
                     sex=shape.sex, part=shape.part, verts=shape.verts,
-                    tris=shape.tris, representative=shape.relpath,
-                    members=[shape.relpath]))
+                    tris=shape.tris, representative=shape.label,
+                    members=[shape.label]))
         out.extend(clusters)
     return out
 
@@ -373,9 +391,63 @@ def verify_against_clusters(shapes: list[ShapeInput],
             matched += 1
             worst = max(worst, best)
         else:
-            unmatched.append(shape.relpath)
+            unmatched.append(shape.label)
     return VerifyResult(matched=matched, unmatched=unmatched,
                         worst_distance=worst)
+
+
+def verify_written_library(assignments: list[tuple[ShapeInput, str]],
+                           morphs_dir: str,
+                           accept: float = SAME_MESH_LIMIT) -> VerifyResult:
+    """Replay the plugin's matching against the files actually on disk.
+
+    Verifying against the in-memory clusters cannot see anything that goes
+    wrong between those arrays and the bytes written — the serialiser, the
+    float32 cast, or the wrong array reaching the wrong filename. The plugin
+    reads files, so this reads files.
+
+    It also checks that each shape's best match is *its own* set, not merely
+    that something in its key is close enough: a representative assigned to the
+    wrong filename would still morph the shape, with a field authored for a
+    different mesh.
+    """
+    cache: dict[str, np.ndarray] = {}
+    index: dict[tuple[str, int], list[tuple[str, np.ndarray]]] = defaultdict(list)
+    for shape, name in assignments:
+        if name in cache:
+            continue
+        path = os.path.join(morphs_dir, name)
+        try:
+            with open(path, "rb") as handle:
+                tri = read_tri(handle.read(), source=path)
+        except (OSError, TriError) as exc:
+            raise ValueError(f"the set written to {name} cannot be read back, "
+                             f"so the plugin could not read it either: {exc}"
+                             ) from exc
+        if tri.morph_names() != list(MORPHS):
+            raise ValueError(f"{name} holds morphs {tri.morph_names()}, "
+                             f"not {list(MORPHS)}")
+        cache[name] = tri.verts.astype(np.float64)
+        index[(shape.sex, tri.vertex_count)].append((name, cache[name]))
+
+    matched, unmatched, wrong, worst = 0, [], [], 0.0
+    for shape, expected in assignments:
+        candidates = index.get((shape.sex, len(shape.verts)), [])
+        best_name, best = None, float("inf")
+        for name, verts in candidates:
+            distance = centred_mean_distance(shape.verts, verts)
+            if distance < best:
+                best_name, best = name, distance
+        if best >= accept:
+            unmatched.append(shape.label)
+            continue
+        matched += 1
+        worst = max(worst, best)
+        if best_name != expected:
+            wrong.append(f"{shape.label} -> {best_name} (expected {expected})")
+    return VerifyResult(matched=matched, unmatched=unmatched,
+                        worst_distance=worst, wrong_set=wrong,
+                        source="written files")
 
 
 def sanitize_tag(tag: str) -> str:
@@ -467,6 +539,16 @@ class LibrarySummary:
     skipped: dict[str, int] = field(default_factory=dict)
     bytes_written: int = 0
     manifest: str | None = None
+    # Sets whose weakest morph moves nothing at all. A library of zeros matches
+    # every shape and applies nothing, which is indistinguishable from a working
+    # one unless this is measured.
+    zero_delta_sets: int = 0
+    # True when nothing at all came out with movement in it — a broken
+    # reference head rather than an awkward mesh.
+    all_sets_zero: bool = False
+    weakest_delta_max: float = 0.0
+    wrong_set: list[str] = field(default_factory=list)
+    verified_from: str = "memory"
 
 
 def _expand(shape: ShapeInput, options: LibraryOptions) -> list[ShapeInput]:
@@ -544,6 +626,8 @@ def build_library(shapes: list[ShapeInput], refs: dict[str, HeadReference],
     p50s: list[float] = []
     kept: list[GeometryCluster] = []
     set_of_member: dict[tuple[str, str], str] = {}
+    zero_sets: list[str] = []
+    weakest: list[float] = []
 
     for cluster in clusters:
         frame = pick_frame(refs[cluster.sex], cluster.verts)
@@ -553,20 +637,45 @@ def build_library(shapes: list[ShapeInput], refs: dict[str, HeadReference],
         # 1.0 unit, and the six that do not sit at 14.5 to 31.4 with nothing in
         # between, so this test falls inside an empty band rather than on a
         # tuned edge.
+        #
+        # The test is on the single nearest vertex, not a percentile: a braid
+        # whose dozen root vertices lie on the scalp and whose three hundred
+        # others hang below is attached, and those roots take the full delta.
         if (preset.falloff is not None
                 and frame.contact_distance >= preset.falloff):
             members = set(cluster.members)
             for shape, result in accepted:
-                if (shape.relpath in members and shape.sex == cluster.sex
+                if (shape.label in members and shape.sex == cluster.sex
                         and result.status == "pending"):
                     skip(result,
-                         "detached from the head surface (closest vertices "
-                         f"{frame.contact_distance:.1f} units away, past the "
-                         "falloff radius)")
+                         "detached from the head surface (its nearest vertex "
+                         f"is {frame.contact_distance:.1f} units away, past "
+                         "the falloff radius, so every delta would be zero)")
             continue
 
         built = build_set(refs[cluster.sex], cluster, preset=preset,
                           frame=frame)
+
+        # A set whose weakest morph is flat matches the shape and applies
+        # nothing, which from inside the program is indistinguishable from a
+        # working one. It is this shape's problem, not the run's — the same
+        # thing detachment is, found after building rather than before — so it
+        # is skipped with the reason and the other shapes still ship. Every set
+        # coming out flat is a different matter: that is a broken reference
+        # head, and the caller is told so below.
+        floor = built.metrics.get("delta_max_min", 0.0)
+        if floor <= 0.0:
+            zero_sets.append(cluster.representative)
+            members = set(cluster.members)
+            for shape, result in accepted:
+                if (shape.label in members and shape.sex == cluster.sex
+                        and result.status == "pending"):
+                    skip(result,
+                         "its morph field came out all zeros: the reference "
+                         "head does not move where this mesh sits, so no set "
+                         "was written")
+            continue
+
         name = set_filename(options.tag, cluster.sex, len(cluster.verts), used)
         summary.bytes_written += len(built.data)
         summary.frames[frame.name] = summary.frames.get(frame.name, 0) + 1
@@ -575,6 +684,8 @@ def build_library(shapes: list[ShapeInput], refs: dict[str, HeadReference],
         kept.append(cluster)
         for member in cluster.members:
             set_of_member[(cluster.sex, member)] = name
+
+        weakest.append(floor)
 
         if not options.dry_run:
             destination = os.path.join(output_dir, MORPHS_SUBDIR, name)
@@ -587,22 +698,58 @@ def build_library(shapes: list[ShapeInput], refs: dict[str, HeadReference],
         summary.median_wrap_p50 = float(np.median(p50s))
         summary.worst_wrap_p50 = float(max(p50s))
 
-    # Stage 3: replay the plugin's matching over everything that went in.
-    verifiable = [shape for shape, _result in accepted
-                  if (shape.sex, shape.relpath) in set_of_member]
-    verdict = verify_against_clusters(verifiable, kept)
+    summary.zero_delta_sets = len(zero_sets)
+    if weakest:
+        summary.weakest_delta_max = float(min(weakest))
+
+    # Every candidate coming out flat is not a property of the meshes: it is a
+    # reference head with no usable RLY_ fields, or a falloff smaller than the
+    # standoff of the whole mod. That is the caller's setup, so it is reported
+    # as a failure of each shape rather than a skip.
+    summary.all_sets_zero = bool(zero_sets) and not rows
+    if summary.all_sets_zero:
+        for _shape, result in accepted:
+            if result.status in ("skipped", "pending"):
+                result.status = "failed"
+                result.error = (
+                    "every set in this run came out all zeros. The reference "
+                    "head carries no usable RLY_ morphs where these meshes "
+                    "sit, or --falloff is smaller than their standoff.")
+
+    # Stage 3: replay the plugin's matching over everything that went in. Off
+    # the written files whenever there are files — the plugin reads files, and
+    # the serialiser sits between the arrays above and what it will see.
+    assignments = [(shape, set_of_member[(shape.sex, shape.label)])
+                   for shape, _result in accepted
+                   if (shape.sex, shape.label) in set_of_member]
+    if options.dry_run:
+        verdict = verify_against_clusters(
+            [shape for shape, _name in assignments], kept)
+        verdict.source = "memory (dry run)"
+    else:
+        verdict = verify_written_library(
+            assignments, os.path.join(output_dir, MORPHS_SUBDIR))
     summary.verified = verdict.matched
     summary.unmatched = verdict.unmatched
+    summary.wrong_set = verdict.wrong_set
+    summary.verified_from = verdict.source
 
     unmatched = set(verdict.unmatched)
+    wrong = {entry.split(" -> ")[0] for entry in verdict.wrong_set}
     for shape, result in accepted:
         if result.status != "pending":
             continue
-        name = set_of_member.get((shape.sex, shape.relpath))
-        if name is None or shape.relpath in unmatched:
+        name = set_of_member.get((shape.sex, shape.label))
+        if name is None or shape.label in unmatched:
             result.status = "failed"
             result.error = ("no set in the written library matches this shape; "
                             "the plugin would not apply anything to it")
+            continue
+        if shape.label in wrong:
+            result.status = "failed"
+            result.error = ("the closest set in the library is one authored for "
+                            "a different mesh; the plugin would morph this "
+                            "shape with the wrong field")
             continue
         result.status = "patched"
         result.method = "wrap"

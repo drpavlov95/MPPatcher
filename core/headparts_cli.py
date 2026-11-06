@@ -34,7 +34,7 @@ from core.source_staging import StagedSource, find_tri_root
 from core.vfs import app_directory
 
 PART_CHOICES = ("misc", "face", "eyes", "hair", "facialhair", "scar",
-                "eyebrows")
+                "eyebrows", "unclassified")
 
 
 ARCHIVE_SUFFIXES = (".zip", ".7z", ".rar", ".bsa", ".ba2")
@@ -76,6 +76,11 @@ def build_headparts_parser() -> argparse.ArgumentParser:
     ap.add_argument("--male-ref", help="FACE_MaleHead.tri to sample from")
     ap.add_argument("--filter-file",
                     help="newline-separated relative paths to limit the run to")
+    ap.add_argument("--archives", choices=("all", "none"), default="all",
+                    help="whether meshes extracted from the mod's BSAs are "
+                         "included. They cannot be named in --filter-file, "
+                         "because what is inside an archive is only known once "
+                         "the run opens it (default %(default)s).")
     ap.add_argument("--dry-run", action="store_true",
                     help="measure and report without writing anything")
 
@@ -86,8 +91,10 @@ def build_headparts_parser() -> argparse.ArgumentParser:
                          help="part type for meshes no plugin declares")
     library.add_argument("--default-sex", choices=("female", "male"),
                          help="sex for shapes nothing else resolves. Only for "
-                              "a mod that is wholly one sex — a wrong sex "
-                              "files the set under a key nothing looks up.")
+                         "a mod that is wholly one sex — a wrong sex "
+                         "files the set under a key nothing looks up.")
+    library.add_argument("--sex-overrides",
+                         help="tab-separated relative NIF path and sex overrides")
     library.add_argument("--unclassified-both", action="store_true",
                          help="ship shapes whose sex cannot be determined for "
                               "both sexes instead of skipping them")
@@ -124,18 +131,78 @@ def _selected_paths(filter_file: str | None) -> set[str] | None:
             for line in text.splitlines() if line.strip()}
 
 
-def _is_selected(selected: set[str] | None, relpath: str, shape: str) -> bool:
+def _sex_overrides(path: str | None) -> dict[str, str]:
+    if not path:
+        return {}
+    result = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        relpath, _, sex = line.partition("\t")
+        sex = sex.strip().lower()
+        if relpath.strip() and sex in {"female", "male"}:
+            result[relpath.strip().replace("\\", "/").lower()] = sex
+    return result
+
+
+def _is_selected(selected: set[str] | None, relpath: str, shape: str, *,
+                 from_archive: bool = False, archives: str = "all") -> bool:
     """Whether this shape was asked for.
 
-    The GUI checks rows, and in library mode a row is one *shape* — a NIF can
-    hold several — so its filter carries ``relpath#shape``. TRI mode's filter
-    carries bare paths. Both spellings select, so one filter file works for
-    either mode and selecting a NIF selects every shape in it.
+    A filter entry may name the NIF or one shape inside it, so selecting a NIF
+    selects every shape it holds.
+
+    Geometry extracted from an archive is exempt while ``archives`` is "all".
+    A filter can only ever name loose paths — the GUI builds it from the rows it
+    listed, and what is inside a BSA is not known until the run opens it — so
+    applying it to extracted meshes dropped every one of them. A mod with three
+    loose NIFs beside a BSA holding a hundred and eighty then reported success
+    over three of a hundred and eighty-three.
     """
+    if from_archive and archives == "all":
+        return True
     if selected is None:
         return True
     key = relpath.replace("\\", "/")
     return key in selected or f"{key}#{shape}" in selected
+
+
+def _geometry_shortfall(*, expected: int, read: int,
+                        failures: list[str]) -> str | None:
+    """Why the geometry read does not account for the whole mod, or None.
+
+    nifdump reports its own tally and emits one ``[FAIL]`` line per NIF it
+    cannot load. Printing those as warnings and carrying on meant a run that
+    read 10 of a mod's 50 meshes reported "Verified: 10 of 10" and exited 0 —
+    a library covering a fifth of the mod, reported as a success.
+    """
+    if failures:
+        return (f"{len(failures)} NIF(s) could not be read, so the library "
+                f"cannot cover the mod: {failures[0]}"
+                + (f" (and {len(failures) - 1} more)" if len(failures) > 1
+                   else ""))
+    if expected and read < expected:
+        return (f"nifdump reported {expected} shapes but only {read} could be "
+                "read back; the library would silently cover part of the mod")
+    return None
+
+
+def _fail_on_empty_selection(*, shapes, geometries: int,
+                             selected: set[str] | None,
+                             offered: list[str] | None = None) -> str | None:
+    """Why a non-empty mod produced nothing to do, or None.
+
+    A filter whose spelling does not match nifdump's relpaths — a difference in
+    case is enough — selected nothing, and the run printed "Sets: 0 written /
+    Verified: 0 of 0" and exited 0.
+    """
+    if shapes or not geometries or selected is None:
+        return None
+    wanted = sorted(selected)[:1]
+    lines = [f"the selection matched none of the {geometries} shapes found"]
+    if wanted:
+        lines.append(f"asked for: {wanted[0]}")
+    if offered:
+        lines.append(f"found:     {offered[0]}")
+    return "; ".join(lines)
 
 
 def _report_lines(report) -> None:
@@ -200,16 +267,20 @@ def _run_library(args) -> int:
                 print(f"Archives: {len(source.archives)} opened, "
                       f"{len(staged_roots)} yielded NIFs")
 
-            geometries, dump_failures, empty = [], [], 0
+            geometries, dump_failures = [], []
+            empty, declared, walked_nifs = [], 0, 0
             for index, root in enumerate(roots):
                 try:
                     run = dump_tree(exe, root, os.path.join(work, f"d{index}"))
                 except NifdumpMissing as exc:
                     print(f"[ERROR] {exc}")
                     return 2
-                geometries.extend(read_geometries(run))
+                for geometry in read_geometries(run):
+                    geometries.append((geometry, index > 0))
                 dump_failures.extend(run.failures)
-                empty += len(run.empty)
+                empty.extend(run.empty)
+                declared += run.shapes
+                walked_nifs += run.nifs
             for failure in dump_failures:
                 print(f"[WARN   ] {failure}")
 
@@ -218,9 +289,18 @@ def _run_library(args) -> int:
                       "Headparts are patched from their meshes, so there is "
                       "nothing to do.")
                 return 2
-            print(f"Geometry: {len(geometries)} shapes from "
-                  f"{len(source.loose_nifs) + len(source.archives)} inputs"
-                  + (f", {empty} NIFs with no usable geometry" if empty else ""))
+            print(f"Geometry: {len(geometries)} shapes from {walked_nifs} NIF(s)"
+                  + (f", {len(empty)} with no usable geometry" if empty else ""))
+
+            # nifdump's own tally against what came back. A mod whose meshes
+            # mostly fail to load must not report the fraction that worked as a
+            # success.
+            shortfall = _geometry_shortfall(expected=declared,
+                                            read=len(geometries),
+                                            failures=dump_failures)
+            if shortfall:
+                print(f"[ERROR] {shortfall}")
+                return 2
 
             plugins = source.plugins
             hdpt = None
@@ -234,20 +314,34 @@ def _run_library(args) -> int:
                 print("Plugins:  none found; sex falls back to the path and "
                       "filename rules")
 
-            stems = collect_stems(g.relpath for g in geometries)
+            stems = collect_stems(g.relpath for g, _a in geometries)
             selected = _selected_paths(args.filter_file)
+            sex_overrides = _sex_overrides(args.sex_overrides)
             shapes = []
-            for geometry in geometries:
-                if not _is_selected(selected, geometry.relpath, geometry.shape):
+            for geometry, from_archive in geometries:
+                if not _is_selected(selected, geometry.relpath, geometry.shape,
+                                    from_archive=from_archive,
+                                    archives=args.archives):
                     continue
                 found = classify(geometry.relpath, hdpt=hdpt, stems=stems,
                                  default_sex=args.default_sex,
                                  default_part=args.part)
+                override = sex_overrides.get(geometry.relpath.replace("\\", "/").lower())
+                if override:
+                    found.sex = override
+                    found.sex_source = "manual"
                 shapes.append(ShapeInput(
                     relpath=geometry.relpath, shape=geometry.shape,
                     sex=found.sex, sex_source=found.sex_source,
                     part=found.part, verts=geometry.verts,
                     tris=geometry.tris))
+
+            empty_selection = _fail_on_empty_selection(
+                shapes=shapes, geometries=len(geometries), selected=selected,
+                offered=[g.relpath for g, _a in geometries])
+            if empty_selection:
+                print(f"[ERROR] {empty_selection}")
+                return 2
 
             options = LibraryOptions(
                 tag=args.tag or default_tag(args.source),
@@ -266,11 +360,26 @@ def _run_library(args) -> int:
           + f", {summary.bytes_written / 1e6:.1f} MB")
     print(f"Verified: {summary.verified} of "
           f"{summary.verified + len(summary.unmatched)} shipped shapes match "
-          "a set the plugin would find")
+          f"a set the plugin would find, read from {summary.verified_from}")
     if summary.unmatched:
         print("[ERROR] these shapes match no set in the library, so the "
               "plugin would apply nothing to them: "
               + ", ".join(summary.unmatched[:10]))
+    if summary.wrong_set:
+        print("[ERROR] these shapes match a set authored for a different "
+              "mesh, so the plugin would morph them with the wrong field: "
+              + ", ".join(summary.wrong_set[:10]))
+    if summary.all_sets_zero:
+        print("[ERROR] every set in this run came out all zeros: the reference "
+              "head carries no usable RLY_ morphs where these meshes sit, or "
+              "--falloff is smaller than their standoff. Nothing was written.")
+    elif summary.zero_delta_sets:
+        print(f"Flat:     {summary.zero_delta_sets} geometr(ies) received no "
+              "movement from the head and were skipped rather than shipped as "
+              "files of zeros")
+    if summary.sets:
+        print(f"Movement: weakest morph peak across the library "
+              f"{summary.weakest_delta_max:.3f} units")
     print(f"Frames:   {summary.frames or '{}'}")
     print(f"Distance: headpart-to-head p50, median {summary.median_wrap_p50:.2f}, "
           f"worst {summary.worst_wrap_p50:.2f}")
@@ -283,7 +392,8 @@ def _run_library(args) -> int:
         print(f"Manifest: {summary.manifest}")
 
     counts = _tally(report)
-    return 1 if (counts.get("failed") or summary.unmatched) else 0
+    return 1 if (counts.get("failed") or summary.unmatched
+                 or summary.wrong_set or summary.all_sets_zero) else 0
 
 
 def _run_tri(args) -> int:

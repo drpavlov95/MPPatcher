@@ -120,8 +120,8 @@ class ClusterTests(unittest.TestCase):
         clusters = cluster_geometries([_shape("a.nif", verts),
                                        _shape("b.nif", verts.copy())])
         self.assertEqual(len(clusters), 1)
-        self.assertEqual(clusters[0].members, ["a.nif", "b.nif"])
-        self.assertEqual(clusters[0].representative, "a.nif")
+        self.assertEqual(clusters[0].members, ["a.nif#Hair", "b.nif#Hair"])
+        self.assertEqual(clusters[0].representative, "a.nif#Hair")
 
     def test_a_translated_copy_is_the_same_geometry(self):
         verts = _grid()
@@ -192,7 +192,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(len(clusters), 2)
         result = verify_against_clusters(shapes, clusters[1:])
         self.assertEqual(result.matched, 1)
-        self.assertEqual(result.unmatched, ["a.nif"])
+        self.assertEqual(result.unmatched, ["a.nif#Hair"])
 
     def test_a_separate_cluster_within_the_plugin_threshold_still_matches(self):
         # The flip side, stated so the behaviour is deliberate: two geometries
@@ -212,7 +212,7 @@ class VerifyTests(unittest.TestCase):
         clusters = cluster_geometries(female)
         male = [_shape("m.nif", verts.copy(), sex="male")]
         self.assertEqual(verify_against_clusters(male, clusters).unmatched,
-                         ["m.nif"])
+                         ["m.nif#Hair"])
 
     def test_the_worst_distance_is_reported_even_when_everything_matched(self):
         verts = _grid(seed=4)
@@ -235,7 +235,7 @@ class VerifyTests(unittest.TestCase):
         clusters = cluster_geometries(shapes, limit=1000.0)
         self.assertEqual(len(clusters), 1)
         self.assertEqual(verify_against_clusters(shapes, clusters).unmatched,
-                         ["b.nif"])
+                         ["b.nif#Hair"])
 
     def test_verification_reports_nothing_unmatched_for_no_shapes(self):
         result = verify_against_clusters([], [])
@@ -529,6 +529,9 @@ class BuildLibraryTests(unittest.TestCase):
     def _out(self, folder):
         return os.path.join(folder, MORPHS_SUBDIR)
 
+    def _out(self, folder):
+        return os.path.join(folder, MORPHS_SUBDIR)
+
     def test_writes_tris_and_one_manifest_under_the_morphs_subdir(self):
         with tempfile.TemporaryDirectory() as folder:
             shapes = [_shape("a.nif", self._near()),
@@ -658,6 +661,149 @@ class BuildLibraryTests(unittest.TestCase):
             self.assertEqual(summary.frames, {"head": 1, "origin": 1})
             self.assertEqual(summary.shapes, 2)
             self.assertAlmostEqual(summary.median_wrap_p50, 0.5, places=3)
+
+    # ── Findings from the whole-branch review ─────────────────────────
+    def test_two_shapes_in_one_nif_are_tracked_separately(self):
+        # Finding 1. members/set_of_member keyed on relpath meant one shape's
+        # fate was reported for its sibling: a detached braid marked an attached
+        # cap "skipped" although the cap's set was on disk, double-counted the
+        # skip, and made verification report a shape unmatched that was never
+        # shipped — failing a run whose library was correct.
+        near = self._near(12, offset=0.5)
+        far = self._near(10, offset=30.0, seed=21)
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("hair.nif", far, shape="Braid"),
+                      _shape("hair.nif", near, shape="Cap")]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            by_label = {f.relpath: f for f in report.files}
+            self.assertEqual(by_label["hair.nif#Braid"].status, "skipped")
+            self.assertEqual(by_label["hair.nif#Cap"].status, "patched")
+            self.assertEqual(summary.unmatched, [])
+            self.assertEqual(summary.skipped,
+                             {"detached from the head surface": 1})
+
+    def test_each_shape_in_one_nif_points_at_its_own_set(self):
+        # Finding 1, benign variant: two attached shapes of different vertex
+        # counts had the wrong filename reported for one of them.
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("hair.nif", self._near(10), shape="A"),
+                      _shape("hair.nif", self._near(12, seed=22), shape="B")]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(summary.sets, 2)
+            outputs = {f.relpath: os.path.basename(f.output or "")
+                       for f in report.files}
+            self.assertEqual(outputs["hair.nif#A"], "RLY_T_F_10.tri")
+            self.assertEqual(outputs["hair.nif#B"], "RLY_T_F_12.tri")
+
+    def test_a_shape_whose_roots_touch_the_scalp_is_not_called_detached(self):
+        # Finding 2. contact_distance was the 5th percentile of a subsample, so
+        # a braid with 12 root vertices on the scalp and 288 hanging 30 units
+        # below was dropped as "detached", with a message claiming its closest
+        # vertices were 30 units away. Those roots receive the full delta, and
+        # the hairline is where losing it shows most.
+        roots = self._near(12, offset=0.3, seed=31)
+        tail = self._near(288, offset=30.0, seed=32)
+        braid = np.vstack([roots, tail])
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("braid.nif", braid)]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].status, "patched")
+            self.assertEqual(summary.sets, 1)
+
+    def test_the_detached_message_names_the_distance_it_measured(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("braid.nif", self._near(offset=30.0))]
+            report, _summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            warning = " ".join(report.files[0].warnings)
+            self.assertIn("nearest vertex", warning)
+
+    def test_a_library_whose_deltas_are_all_zero_fails_the_run(self):
+        # Finding 4. A reference with zeroed RLY_* fields, or a falloff small
+        # enough to zero everything, produced a library that matched every
+        # shape, verified N of N and exited 0 — while applying nothing. The
+        # measurement to catch it was already being computed and discarded.
+        flat = [("RLY_Heavy", 0.0), ("RLY_Muscular", 0.0), ("RLY_Thin", 0.0)]
+        with tempfile.TemporaryDirectory() as folder:
+            refs = {sex: load_head_reference(
+                _write_reference(folder, f"flat_{sex}.tri", flat), sex)
+                for sex in ("female", "male")}
+            shapes = [_shape("a.nif", self._near())]
+            report, summary = build_library(
+                shapes, refs, folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].status, "failed")
+            self.assertIn("zero", (report.files[0].error or "").lower())
+            self.assertEqual(summary.zero_delta_sets, 1)
+            self.assertTrue(summary.all_sets_zero)
+            self.assertEqual(summary.sets, 0)
+
+    def test_one_flat_set_beside_working_ones_is_a_skip_not_a_failed_run(self):
+        # Measured on BG3 hairs: one accessory sits just inside the falloff and
+        # still receives a flat field. Failing the whole run for it told the
+        # user nothing worked, when 45 of 50 shapes had correct sets.
+        with tempfile.TemporaryDirectory() as folder:
+            refs = self._refs(folder)
+            # A second reference whose morphs are flat, used for the male shape
+            # only, so one set comes out zero and the other does not.
+            flat = [("RLY_Heavy", 0.0), ("RLY_Muscular", 0.0),
+                    ("RLY_Thin", 0.0)]
+            refs["male"] = load_head_reference(
+                _write_reference(folder, "flat_male.tri", flat), "male")
+            shapes = [_shape("good.nif", self._near()),
+                      _shape("flat.nif", self._near(seed=51), sex="male")]
+            report, summary = build_library(
+                shapes, refs, folder, LibraryOptions(tag="T"))
+            by_label = {f.relpath: f for f in report.files}
+            self.assertEqual(by_label["good.nif#Hair"].status, "patched")
+            self.assertEqual(by_label["flat.nif#Hair"].status, "skipped")
+            self.assertFalse(summary.all_sets_zero)
+            self.assertEqual((summary.sets, summary.zero_delta_sets), (1, 1))
+
+    def test_a_normal_run_reports_no_zero_delta_sets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near())]
+            _report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(summary.zero_delta_sets, 0)
+            self.assertGreater(summary.weakest_delta_max, 0.0)
+
+    def test_verification_reads_the_files_it_wrote(self):
+        # Finding 5. Verifying against the in-memory clusters cannot see
+        # anything that goes wrong between those arrays and the bytes on disk.
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near()),
+                      _shape("b.nif", self._near(seed=41), sex="male")]
+            _report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(summary.verified_from, "written files")
+            self.assertEqual(summary.verified, 2)
+
+    def test_a_truncated_set_on_disk_is_caught_by_verification(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near())]
+            original = write_tri
+
+            def write_then_damage(tri):
+                data = original(tri)
+                return data[: len(data) // 2]
+
+            with mock.patch("core.headpart_library.write_tri",
+                            side_effect=write_then_damage):
+                with self.assertRaises(ValueError):
+                    build_library(shapes, self._refs(folder), folder,
+                                  LibraryOptions(tag="T"))
+
+    def test_a_dry_run_says_it_verified_in_memory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near())]
+            _report, summary = build_library(
+                shapes, self._refs(folder), folder,
+                LibraryOptions(tag="T", dry_run=True))
+            self.assertEqual(summary.verified_from, "memory (dry run)")
+            self.assertEqual(summary.verified, 1)
 
     def test_no_shapes_at_all_produces_an_empty_report_not_an_error(self):
         with tempfile.TemporaryDirectory() as folder:

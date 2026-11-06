@@ -64,6 +64,15 @@ class DetectHeadpartSexTests(unittest.TestCase):
         self.assertEqual(
             detect_headpart_sex("HairShortHumanF.tri", stems=stems), "female")
 
+    def test_the_conventions_the_old_rule_accepted_still_resolve(self):
+        # Measured against commit 1d85d91: these four were female/male before
+        # and must not have become unknown or flipped.
+        self.assertEqual(detect_headpart_sex("hair/f_longbraid.tri"), "female")
+        self.assertEqual(detect_headpart_sex("hair/m_longbraid.tri"), "male")
+        self.assertEqual(detect_headpart_sex("hair/braid_f.tri"), "female")
+        self.assertEqual(detect_headpart_sex("meshes/male/femalehair01.tri"),
+                         "female")
+
     def test_something_with_no_evidence_at_all_is_unknown(self):
         self.assertEqual(detect_headpart_sex("meshes\\hair\\911.tri"),
                          "unknown")

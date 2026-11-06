@@ -159,6 +159,17 @@ class DumpTreeTests(unittest.TestCase):
             self.assertEqual(run.failures, ["x.nif: cannot load"])
             self.assertEqual((run.nifs, run.shapes), (1, 0))
 
+    def test_an_exe_path_that_does_not_exist_raises_nifdump_missing(self):
+        # find_nifdump returns an operator override unprobed, deliberately, so
+        # a typo in MPP_NIFDUMP or --nifdump reaches subprocess.run. Without
+        # this guard the user got a raw FileNotFoundError in a localised
+        # Windows string that never mentioned nifdump or the path tried.
+        with tempfile.TemporaryDirectory() as folder:
+            missing = os.path.join(folder, "definitely", "not", "nifdump.exe")
+            with self.assertRaises(NifdumpMissing) as caught:
+                dump_tree(missing, folder, os.path.join(folder, "w"))
+            self.assertIn("nifdump.exe", str(caught.exception))
+
     def test_a_crash_with_no_tally_is_recorded_rather_than_swallowed(self):
         def runner(_argv):
             return 3221225781, "The code execution cannot proceed\n"

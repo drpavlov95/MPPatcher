@@ -6,19 +6,35 @@ never moved, and the log said success. Read these before trusting a run.
 
 ## The one line that matters
 
-```
-Verified: 190 of 190 shipped shapes match a set the plugin would find
+```text
+Verified: 190 of 190 shipped shapes match a set the plugin would find,
+          read from written files
 ```
 
-This is the invariant. After writing the library, MPPatcher rebuilds it the way
-the plugin will — index by `(sex, vertex count)`, pick the best
-`CentredMeanDistance`, accept within 3.0 — and checks that every shape it
-shipped a set for can find that set. The check is written from the plugin's
-rules rather than from the clustering that produced the library, so a bug shared
-by both cannot verify itself.
+This is the invariant. After writing the library, MPPatcher **re-reads the files
+it just wrote** and rebuilds the index the way the plugin will — key on
+`(sex, vertex count)`, pick the best `CentredMeanDistance`, accept within 3.0 —
+then checks two things for every shape it shipped a set for: that it finds a set
+at all, and that the set it finds is *its own*. The second half matters because
+a representative written under the wrong filename would still be morphed, by a
+field authored for a different mesh.
+
+Reading the files rather than the arrays in memory is deliberate: the plugin
+reads files, and the serialiser, the float32 cast and the filename assignment
+all sit between the two. A dry run has no files, so it verifies in memory and
+says so.
 
 Anything less than `N of N` is a failure, not a warning, and the run exits
 non-zero with the shapes named.
+
+```text
+Movement: weakest morph peak across the library 0.171 units
+```
+
+The other half of "it verifies but does nothing". A library of zeros matches
+every shape and applies nothing, which from inside the program is
+indistinguishable from a working one. If any set's weakest `RLY_` morph comes
+out flat, the run fails and names the count.
 
 ## Distance
 
@@ -50,11 +66,16 @@ headpart the two candidates differ by 100× to 600×.
 Skipped:  16 x detached from the head surface
 ```
 
-A shape whose closest vertices are further from the head than the falloff radius
-(14 units by default) receives a delta of zero everywhere by construction, so a
-set for it would be a file of zeros — about 30 bytes per vertex of nothing. The
-game behaves identically without one, so it is not written, and the reason is
-reported.
+A shape whose **nearest vertex** is further from the head than the falloff
+radius (14 units by default) receives a delta of zero everywhere by
+construction, so a set for it would be a file of zeros — about 30 bytes per
+vertex of nothing. The game behaves identically without one, so it is not
+written, and the reason is reported.
+
+The nearest vertex, not a percentile. A braid with a dozen root vertices on the
+scalp and three hundred hanging below is attached, and those roots take the full
+delta; a percentile would call it detached and drop the movement exactly at the
+hairline, where it shows most.
 
 Measured across 240 real shapes, this is cleanly separated: 234 contact the head
 within 1.0 unit, 6 sit at 14.5 to 31.4, and **nothing falls in between**. The
@@ -81,7 +102,8 @@ the rules run in this order, and the run says which one answered:
 | `plugin` | High | an `HDPT` record in the mod's own plugin declared it |
 | `path` | Medium | `hair/female/` or `hair/male/` in the path |
 | `filename` | Medium | `female`/`male` in the name — `femaledarkelfhair01` |
-| `paired` | Medium | a trailing `F`/`M` **and** the opposite file exists |
+| `filename` | Medium | an `f_`/`m_` prefix or `_f`/`_m` suffix — the separator makes it deliberate |
+| `paired` | Medium | a bare trailing `F`/`M` **and** the opposite file exists |
 | `default` | Low | you stated `--default-sex` for the whole mod |
 | `unresolved` | Unknown | skipped, unless `--unclassified-both` |
 
@@ -92,7 +114,11 @@ meshes. The one holdout, Cyberpunk 2077 Hairs' `rogueHaircap.nif`, has no record
 because no headpart references it.
 
 A record declared for *both* sexes is treated as unresolved, not as licence to
-pick one.
+pick one — and it still counts as a conflict when it sits beside a single-sex
+record for the same mesh. Within the path and filename rules, every *female*
+signal is tested before any male one, across both the directory and the name:
+when `meshes/male/femalehair01.nif` disagrees with itself, neither source is
+authoritative and the tie goes to female.
 
 ## Two thresholds, deliberately different
 
@@ -170,9 +196,10 @@ goes with it.
 
 ## Native binaries, and the path trap
 
-`nifdump.exe` is resolved from the program's **own** directory
-(`sys.executable` when frozen), then its parent, then `MPP_NIFDUMP` — never
-from `dirname(__file__)`, which inside a PyInstaller bundle is a temporary
+`nifdump.exe` is resolved from `MPP_NIFDUMP` first — an exported path is a
+deliberate choice of binary, so it is used as given and never probed — then the
+program's **own** directory (`sys.executable` when frozen), then its parent.
+Never from `dirname(__file__)`, which inside a PyInstaller bundle is a temporary
 extraction folder. The first frozen build of this feature reported nifdump
 missing while it sat right beside `MPPatcher.exe`, and every unit test passed
 with that bug in place. Deploy both native binaries beside the exe that MO2

@@ -144,6 +144,82 @@ class NifdumpMissingTests(unittest.TestCase):
             self.assertIn("MPP_NIFDUMP", text)
 
 
+class SilentSuccessTests(unittest.TestCase):
+    """Paths where a run under-covered a mod and still exited 0."""
+
+    def _source(self, folder):
+        source = os.path.join(folder, "mod")
+        os.makedirs(source, exist_ok=True)
+        return source
+
+    def test_a_filter_matching_nothing_is_an_error_not_an_empty_success(self):
+        # Finding 7. A --filter-file whose spelling does not match nifdump's
+        # relpaths (a case difference is enough) left no shapes at all, and the
+        # CLI printed "Sets: 0 written / Verified: 0 of 0" and exited 0. The GUI
+        # then reported "Patching complete — 0 meshes processed".
+        from core.headparts_cli import _fail_on_empty_selection
+        self.assertIsNotNone(_fail_on_empty_selection(
+            shapes=[], geometries=3, selected={"meshes/a.nif"}))
+        self.assertIsNone(_fail_on_empty_selection(
+            shapes=[object()], geometries=3, selected={"meshes/a.nif"}))
+
+    def test_an_empty_selection_error_names_what_was_offered(self):
+        from core.headparts_cli import _fail_on_empty_selection
+        message = _fail_on_empty_selection(
+            shapes=[], geometries=2, selected={"MESHES/A.NIF"},
+            offered=["meshes\\a.nif"])
+        self.assertIn("meshes\\a.nif", message)
+        self.assertIn("MESHES/A.NIF", message)
+
+    def test_a_shortfall_against_nifdumps_own_count_is_reported(self):
+        # Finding 3. nifdump exits 2 and emits [FAIL] per unreadable NIF, but
+        # those were printed as warnings and dropped: a run that read 10 of 50
+        # meshes reported "Verified 10 of 10" and exited 0.
+        from core.headparts_cli import _geometry_shortfall
+        self.assertIsNotNone(_geometry_shortfall(expected=50, read=10,
+                                                 failures=["a.nif: cannot load"]))
+        self.assertIsNone(_geometry_shortfall(expected=50, read=50,
+                                              failures=[]))
+
+    def test_a_shortfall_with_no_failures_is_still_reported(self):
+        from core.headparts_cli import _geometry_shortfall
+        message = _geometry_shortfall(expected=50, read=49, failures=[])
+        self.assertIsNotNone(message)
+        self.assertIn("50", message)
+        self.assertIn("49", message)
+
+    def test_dump_failures_alone_are_a_shortfall(self):
+        from core.headparts_cli import _geometry_shortfall
+        self.assertIsNotNone(_geometry_shortfall(
+            expected=0, read=0, failures=["a.nif: cannot load"]))
+
+
+class ArchiveSelectionTests(unittest.TestCase):
+    """Finding 6: a filter built from loose rows silenced archive content."""
+
+    def test_archives_all_is_the_default_so_nothing_is_silently_dropped(self):
+        self.assertEqual(_parse(BASE).archives, "all")
+
+    def test_archive_geometry_ignores_a_filter_built_from_loose_rows(self):
+        from core.headparts_cli import _is_selected
+        chosen = {"meshes/loose.nif"}
+        # A mod with 3 loose NIFs beside a BSA holding 180: the user checks the
+        # 3 rows, and the filter excluded all 180 extracted shapes while the run
+        # reported success over 3 of 183 meshes.
+        self.assertTrue(_is_selected(chosen, "meshes\\fromBsa.nif", "Beard",
+                                     from_archive=True, archives="all"))
+        self.assertFalse(_is_selected(chosen, "meshes\\fromBsa.nif", "Beard",
+                                      from_archive=True, archives="none"))
+
+    def test_loose_geometry_is_always_subject_to_the_filter(self):
+        from core.headparts_cli import _is_selected
+        chosen = {"meshes/loose.nif"}
+        self.assertTrue(_is_selected(chosen, "meshes\\loose.nif", "Hair",
+                                     from_archive=False, archives="all"))
+        self.assertFalse(_is_selected(chosen, "meshes\\other.nif", "Hair",
+                                      from_archive=False, archives="all"))
+
+
 class ReferenceDiscoveryTests(unittest.TestCase):
     def test_library_mode_stops_when_no_reference_heads_can_be_found(self):
         with tempfile.TemporaryDirectory() as folder:

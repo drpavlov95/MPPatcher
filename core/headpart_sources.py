@@ -75,12 +75,13 @@ CONFIDENCE = {
     "paired": "Medium",
     "default": "Low",       # the operator stated it for the whole mod
     "unresolved": "Unknown",
+    "archive": "—",         # nothing is decided until the run opens it
 }
 
 
 @dataclass
 class HeadpartRow:
-    """One NIF as the GUI shows it, before any geometry is read."""
+    """One NIF — or one archive — as the GUI shows it before a run."""
 
     relpath: str
     sex: str | None
@@ -88,6 +89,10 @@ class HeadpartRow:
     part: str
     confidence: str
     warnings: list[str] = field(default_factory=list)
+    # "mesh" for a loose NIF, "archive" for a BSA whose contents are only read
+    # during the run. Beards of Power ships 181 meshes and no loose NIF at all,
+    # so without archive rows its tree was empty and the run could not start.
+    kind: str = "mesh"
 
 
 def scan_rows(root: str, *, default_part: str = "hair",
@@ -124,7 +129,17 @@ def scan_rows(root: str, *, default_part: str = "hair",
             relpath=relpath, sex=decided.sex, sex_source=decided.sex_source,
             part=decided.part,
             confidence=CONFIDENCE.get(decided.sex_source, "Unknown"),
-            warnings=warnings))
+            warnings=warnings, kind="mesh"))
+
+    # Archives last, so the meshes a user can actually inspect come first.
+    for archive in found.archives:
+        rows.append(HeadpartRow(
+            relpath=os.path.relpath(archive, root),
+            sex=None, sex_source="archive", part=default_part,
+            confidence=CONFIDENCE["archive"],
+            warnings=["Meshes inside this archive are read during the run; "
+                      "their sex and part come from the mod's plugin then."],
+            kind="archive"))
     return rows
 
 

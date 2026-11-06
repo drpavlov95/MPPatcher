@@ -54,7 +54,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Keep the spec portable: add an icon path here only when packaging with
-    # an icon that is present in the checkout.
-    icon=None,
+    icon='mppatcher.ico',
 )

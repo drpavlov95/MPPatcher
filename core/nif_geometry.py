@@ -124,7 +124,16 @@ def dump_tree(exe: str, source_root: str, work_dir: str, *,
 
     argv = [exe, "--dir", source_root, "--out", dump_root,
             "--index", index_path, "--quiet"]
-    code, output = (runner or _default_runner)(argv)
+    try:
+        code, output = (runner or _default_runner)(argv)
+    except OSError as exc:
+        # find_nifdump returns an operator override unprobed, deliberately, so
+        # a typo in MPP_NIFDUMP or --nifdump arrives here. Raised as-is it was a
+        # localised Windows FileNotFoundError that never named nifdump or the
+        # path tried.
+        raise NifdumpMissing(
+            f"nifdump could not be started from {exe!r}: {exc}. Check "
+            f"--nifdump and {ENV_OVERRIDE}.") from exc
 
     run = DumpRun(dump_root=dump_root, index_path=index_path)
     for line in output.splitlines():

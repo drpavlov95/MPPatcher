@@ -61,8 +61,13 @@ def _from_plugin(key: str, hdpt) -> tuple[str | None, str | None]:
     # A mesh declared for both sexes, or by two records that disagree, is a
     # genuine ambiguity. Picking one would file the set under a dead key half
     # the time, so it falls through to the path rules and may end unresolved.
-    sexes = {record.sex for record in records if record.sex}
-    sex = sexes.pop() if len(sexes) == 1 else None
+    #
+    # A record declared for both sexes counts as a conflict even beside a
+    # single-sex one. Dropping it instead — keeping only the records that name
+    # one sex — resolved such a mesh at plugin-grade confidence for a decision
+    # the plugin never made, and left the other sex with no set at all.
+    sexes = {record.sex for record in records}
+    sex = sexes.pop() if len(sexes) == 1 and None not in sexes else None
 
     parts = {record.part_type for record in records
              if record.part_type and record.part_type != "unknown"}
@@ -71,22 +76,37 @@ def _from_plugin(key: str, hdpt) -> tuple[str | None, str | None]:
 
 
 def _from_path(relpath: str) -> tuple[str | None, str | None]:
-    """(sex, source) from the directory first and the filename second.
+    """(sex, source) from the directory and the filename.
 
     Vanilla splits hair into ``hair\\female`` and ``hair\\male``, but the
     variants for the non-human races sit in one folder and carry the sex in the
     filename instead — ``femaledarkelfhair01``, and
-    ``argonianmalehorns04hairline``, where it is in the middle.
+    ``argonianmalehorns04hairline``, where it is in the middle. Some mods use
+    the ``f_``/``m_`` prefix or the ``_f``/``_m`` suffix instead; those count on
+    their own, unlike a bare trailing letter, because the separator makes them
+    deliberate.
+
+    Every *female* indicator is tested before any male one, across both the
+    directory and the filename. Testing the directory first and the filename
+    second instead read ``meshes/male/femalehair01.nif`` as male — a dead key —
+    where the rule this replaced read it as female. Neither source is
+    authoritative when they disagree, so the tie goes to the older answer.
     """
     low = relpath.replace("\\", "/").lower()
+    base = os.path.basename(low)
+    stem = os.path.splitext(base)[0]
+
     if "/female/" in low:
         return "female", "path"
-    if "/male/" in low:
-        return "male", "path"
-    base = os.path.basename(low)
     if "female" in base:
         return "female", "filename"
+    if stem.startswith("f_") or stem.endswith("_f"):
+        return "female", "filename"
+    if "/male/" in low:
+        return "male", "path"
     if "male" in base:
+        return "male", "filename"
+    if stem.startswith("m_") or stem.endswith("_m"):
         return "male", "filename"
     return None, None
 

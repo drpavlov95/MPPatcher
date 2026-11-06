@@ -6,12 +6,17 @@ import subprocess
 import sys
 import tempfile
 import html
+from pathlib import Path
 from datetime import datetime
 from PySide6.QtCore import Qt, QEvent, QTimer, QSize, QRect, QRectF, QPoint, QPointF, QThread, Signal
 
 # Count terminal events once per unique outfit. REBASE/CONFORM/CLIP lines are
 # informational and must not advance progress.
-_PROGRESS_RE = re.compile(r'^\s*\[(DONE|SKIP|PATCHED|PATCH|ERROR|WARN)\s*\]\s+(.+?)\s*$')
+# SKIPPED and FAILED are spelled in full by the headparts backend, and
+# library mode skips routinely — six of fifty shapes on one measured mod.
+# Without them the bar stalled and the summary claimed nothing was skipped.
+_PROGRESS_RE = re.compile(
+    r'^\s*\[(DONE|SKIP|SKIPPED|PATCHED|PATCH|ERROR|FAILED|WARN)\s*\]\s+(.+?)\s*$')
 # The prefix the CLI gives every set it writes, so the patched project can
 # sit beside the original in BodySlide. Progress lines carry it on one of
 # the two reports each set produces.
@@ -851,6 +856,7 @@ class StatCard(QFrame):
         lay.addWidget(self.num_label)
 
         lbl = QLabel(label)
+        self.label = lbl
         lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px;")
         lay.addWidget(lbl)
 
@@ -908,6 +914,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_state()
         self._apply_theme(self._theme_mode)
+        self._apply_target_ui_mode()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1163,7 +1170,7 @@ class MainWindow(QMainWindow):
         self.target_outfits_btn = self._choice_card(
             "tshirt", "Outfits and Armors", "Female / Male body and clothing meshes")
         self.target_headparts_btn = self._choice_card(
-            "face-man", "Headparts", "Hair, brows and beards")
+            "face-man", "Headparts", "NIFs for hair, brows, beards and accessories")
         self.target_outfits_btn.clicked.connect(lambda: self._select_target_kind("outfits"))
         self.target_headparts_btn.clicked.connect(lambda: self._select_target_kind("headparts"))
         self._refresh_choice_card(self.target_outfits_btn, True)
@@ -1210,6 +1217,14 @@ class MainWindow(QMainWindow):
         return page
 
     def _select_target_kind(self, kind: str):
+        if kind == "headparts" and self._source_kind == "bodyslide":
+            # BodySlide projects are not a headpart input.  Drop the old
+            # source context so selecting Headparts cannot silently rescan the
+            # installed SliderGroups as if they were NIF assets.
+            self._source_kind = "folder"
+            self._source_path = ""
+            self._source_input_root = ""
+            self._source_work_root = ""
         if kind != self._target_kind:
             self._set_selection_context(kind, self._source_kind, self._source_path)
         self._target_kind = kind
@@ -1222,7 +1237,103 @@ class MainWindow(QMainWindow):
         else:
             self.configure_source_status.setText(
                 "Outfits and Armors mode uses BodySlide SliderGroups and OSP projects.")
+        self._apply_target_ui_mode()
         self._reload_groups()
+
+    def _apply_target_ui_mode(self):
+        """Adapt only the presentation to the selected target.
+
+        Outfits keep the original BodySlide review and patch controls. Headparts
+        use the same workflow shell, but must not present body references,
+        BodySlide groups, clipping/zap options, or outfit terminology.
+        """
+        headparts = getattr(self, "_target_kind", "outfits") == "headparts"
+        if hasattr(self, "execute_detected_label"):
+            self.execute_detected_label.setText("Resolved" if headparts else "Ready")
+            self.execute_needs_review_label.setText("Unresolved" if headparts else "Need review")
+        self.source_bodyslide_btn.setVisible(not headparts)
+        self.source_bodyslide_btn.setEnabled(not headparts)
+        self.source_zip_btn.setText("ZIP Archive\nHeadpart NIFs, BSAs and plugins" if headparts
+                                    else "ZIP Archive\nBodySlide data or headpart assets in a .zip")
+        self.source_folder_btn.setText("Local Folder\nHeadpart NIFs, BSAs and plugins" if headparts
+                                      else "Local Folder\nBodySlide data or headpart assets in a folder")
+        if hasattr(self, "body_group_filter_combo"):
+            self.body_group_filter_combo.setVisible(not headparts)
+            if hasattr(self, "body_group_filter_label"):
+                self.body_group_filter_label.setVisible(not headparts)
+        if hasattr(self, "groups_card_title"):
+            self.groups_card_title.setText("Headpart meshes" if headparts else "Outfits")
+        if hasattr(self, "group_tree"):
+            self.group_tree.setHeaderLabels(
+                ["Headpart NIF / archive", "Sex", "Patch Status", "", "", ""]
+                if headparts else
+                ["Outfit", "Sex", "Part", "Patch Status", "Revealing", "Smart refit"])
+        if hasattr(self, "search_edit"):
+            self.search_edit.setPlaceholderText(
+                "Search NIF paths or shapes…" if headparts else
+                "Search projects or outfits…")
+        if hasattr(self, "review_page_title"):
+            self.review_page_title.setText("Select Headparts" if headparts else "Select Outfits")
+            self.review_summary.setText("0 headparts selected" if headparts else "0 outfits selected")
+            self.review_continue_btn.setText("Continue to Headpart Setup" if headparts
+                                             else "Continue to Patch Setup")
+        if hasattr(self, "execute_page_title"):
+            self.execute_page_title.setText("Review Headparts" if headparts else "Review & Patch")
+            self.execute_intro.setText(
+                "Review NIF meshes and their detected sex/part metadata, then generate the Physiques of Skyrim morph library."
+                if headparts else
+                "Verify the detected metadata for selected outfits, then configure and start the patch.")
+            self.execute_review_title.setText("Headpart Geometry" if headparts else "Outfit Configuration")
+            self.execute_review_intro.setText(
+                "Geometry is read from NIFs. The generated output is a separate MPF TRI morph library; source files are not modified."
+                if headparts else
+                "Click a field to change its value. A blue dot marks a manual override; amber controls need your attention.")
+        if hasattr(self, "_execute_options_card"):
+            self._execute_options_card.setVisible(not headparts)
+        if hasattr(self, "output_destination_label"):
+            self.output_destination_label.setText("Morph library output" if headparts else "Output")
+        if hasattr(self, "patch_btn") and not self.runner.is_running():
+            self.patch_btn.setText("  Generate Headpart Library" if headparts else "  Start Patching")
+        if hasattr(self, "execute_review_tree"):
+            self._configure_execute_review_columns(headparts)
+
+    def _configure_execute_review_columns(self, headparts: bool):
+        tree = self.execute_review_tree
+        if headparts:
+            tree.setColumnCount(3)
+            tree.setHeaderLabels(["NIF / Shape", "Sex", "Sex source"])
+            tree.headerItem().setToolTip(
+                2, "How the sex was resolved: plugin, path, filename, paired file, or unresolved.")
+            tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            for column in range(3):
+                tree.setItemDelegateForColumn(column, QStyledItemDelegate(tree))
+            self._close_review_header_help()
+            for _column, _title, button in getattr(self, "_review_header_help_buttons", []):
+                button.hide()
+            header = tree.header()
+            header.setSectionResizeMode(0, QHeaderView.Stretch)
+            for column, width in ((1, 100), (2, 170)):
+                header.setSectionResizeMode(column, QHeaderView.Fixed)
+                header.resizeSection(column, width)
+            return
+        tree.setColumnCount(6)
+        tree.setHeaderLabels(["Outfit", "Body Reference", "Mesh Part",
+                              "Output Reference", "Revealing", "Smart refit"])
+        header = tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column, width in ((1, 150), (2, 126), (3, 158), (4, 104), (5, 104)):
+            header.setSectionResizeMode(column, QHeaderView.Fixed)
+            header.resizeSection(column, width)
+        tree.setItemDelegateForColumn(
+            1, ReviewChoiceDelegate(self, "reference", tree))
+        tree.setItemDelegateForColumn(
+            2, ReviewChoiceDelegate(self, "mesh", tree))
+        tree.setItemDelegateForColumn(0, ReadOnlyReviewDelegate(tree))
+        tree.setItemDelegateForColumn(
+            3, ReviewChoiceDelegate(self, "output", tree))
+        for column in FLAG_COLUMNS:
+            tree.setItemDelegateForColumn(column, FlagDelegate(tree, column))
+        self._position_execute_review_header_help()
 
     @staticmethod
     def _source_identity(path: str) -> str:
@@ -1264,9 +1375,10 @@ class MainWindow(QMainWindow):
         else:
             if kind == "zip":
                 path, _ = QFileDialog.getOpenFileName(
-                    self, "Select source ZIP", "", "ZIP archives (*.zip)")
+                    self, "Select source ZIP", self._default_headpart_folder(), "ZIP archives (*.zip)")
             else:
-                path = QFileDialog.getExistingDirectory(self, "Select source folder")
+                path = QFileDialog.getExistingDirectory(
+                    self, "Select source folder", self._default_headpart_folder())
             if not path:
                 self._refresh_source_cards()
                 return
@@ -1292,13 +1404,36 @@ class MainWindow(QMainWindow):
             self.configure_source_status.setText(f"Outfit source: {label} · {root}")
         self._reload_groups()
 
+    def _default_headpart_folder(self) -> str:
+        """Return MO2's physical mods folder as the convenient dialog start."""
+        configured = str(getattr(self.config, "mods_folder", "") or "").strip()
+        candidates = [configured] if configured else []
+        app_dir = Path(str(getattr(self.config, "app_dir", "") or ""))
+        if app_dir:
+            candidates.extend(str(parent / "mods") for parent in app_dir.parents)
+        for candidate in candidates:
+            try:
+                if candidate and Path(candidate).is_dir():
+                    return candidate
+            except OSError:
+                continue
+        return str(app_dir) if app_dir else ""
+
+    def _headpart_default_sex(self) -> str:
+        """Choose the conventional fallback for a source mod's unlabelled NIFs."""
+        name = os.path.basename(self._source_path or self._source_input_root or "").lower()
+        if "beard" in name or "himbo" in name or re.search(r"(?<!fe)male", name):
+            return "male"
+        return "female"
+
     def _build_review_step(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(9)
         header = QHBoxLayout()
-        header.addWidget(QLabel("Select Outfits", objectName="pageTitle"))
+        self.review_page_title = QLabel("Select Outfits", objectName="pageTitle")
+        header.addWidget(self.review_page_title)
         header.addStretch()
         self.review_summary = QLabel("0 outfits selected")
         self.review_summary.setObjectName("dim")
@@ -1333,9 +1468,11 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(content)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
-        lay.addWidget(QLabel("Review & Patch", objectName="pageTitle"))
+        self.execute_page_title = QLabel("Review & Patch", objectName="pageTitle")
+        lay.addWidget(self.execute_page_title)
         execute_intro = _dim(
             "Verify the detected metadata for selected outfits, then configure and start the patch.")
+        self.execute_intro = execute_intro
         execute_intro.setWordWrap(True)
         lay.addWidget(execute_intro)
 
@@ -1358,10 +1495,12 @@ class MainWindow(QMainWindow):
         summary_grid.addWidget(_dim("Selected"), 0, 1)
         summary_grid.addWidget(_dim("|"), 0, 2)
         summary_grid.addWidget(self.execute_detected_summary, 0, 3)
-        summary_grid.addWidget(_dim("Ready"), 0, 4)
+        self.execute_detected_label = _dim("Ready")
+        summary_grid.addWidget(self.execute_detected_label, 0, 4)
         summary_grid.addWidget(_dim("|"), 0, 5)
         summary_grid.addWidget(self.execute_needs_review_summary, 0, 6)
-        summary_grid.addWidget(_dim("Need review"), 0, 7)
+        self.execute_needs_review_label = _dim("Need review")
+        summary_grid.addWidget(self.execute_needs_review_label, 0, 7)
         summary_grid.setColumnStretch(8, 1)
         summary_lay.addLayout(summary_grid)
         lay.addWidget(summary_card)
@@ -1370,9 +1509,11 @@ class MainWindow(QMainWindow):
         review_lay = QVBoxLayout(review_card)
         review_lay.setContentsMargins(16, 14, 16, 14)
         review_lay.setSpacing(8)
-        review_lay.addWidget(QLabel("Outfit Configuration", objectName="section"))
+        self.execute_review_title = QLabel("Outfit Configuration", objectName="section")
+        review_lay.addWidget(self.execute_review_title)
         review_intro = _dim(
             "Click a field to change its value. A blue dot marks a manual override; amber controls need your attention.")
+        self.execute_review_intro = review_intro
         review_intro.setWordWrap(True)
         review_lay.addWidget(review_intro)
         self.execute_review_tree = OutfitReviewTree()
@@ -1465,6 +1606,7 @@ class MainWindow(QMainWindow):
         options_lay.addWidget(self.advanced_options_panel)
         # options_card is added to outer_lay below the scroll area so it never
         # disappears beneath a long technical-review table.
+        self._execute_options_card = options_card
 
         output_panel = QWidget()
         output_lay = QHBoxLayout(output_panel)
@@ -1504,6 +1646,7 @@ class MainWindow(QMainWindow):
         self.output_browse_btn.clicked.connect(self._browse_output_destination)
         out_row.addWidget(self.output_browse_btn)
         output_lay.addLayout(out_row, 1)
+        self._execute_output_panel = output_panel
         # output_panel is also anchored outside the scrollable review.
 
         # Compatibility controls used by the non-destructive backend path.  The
@@ -1593,7 +1736,9 @@ class MainWindow(QMainWindow):
     def _continue_to_execute(self):
         groups = self._checked_groups()
         if not groups:
-            QMessageBox.warning(self, "No outfits selected", "Select at least one outfit before continuing.")
+            noun = "headpart" if self._target_kind == "headparts" else "outfit"
+            QMessageBox.warning(self, f"No {noun}s selected",
+                                f"Select at least one {noun} before continuing.")
             return
         self._update_execute_summary()
         self._refresh_execute_review()
@@ -1610,6 +1755,16 @@ class MainWindow(QMainWindow):
             return
         selected = {member for group in self._checked_groups()
                     for member in group.members}
+        if self._target_kind == "headparts":
+            rows = getattr(self, "_headpart_rows", {})
+            unresolved = sum(
+                1 for name in selected
+                if getattr(rows.get(name), "kind", "mesh") == "mesh"
+                and getattr(rows.get(name), "sex", None) is None)
+            self.execute_selection_summary.setText(str(len(selected)))
+            self.execute_detected_summary.setText(str(len(selected) - unresolved))
+            self.execute_needs_review_summary.setText(str(unresolved))
+            return
         needs_review = sum(
             1 for name in selected
             if not self._scan_data.get(name) or self._scan_data[name].needs_attention)
@@ -1627,6 +1782,9 @@ class MainWindow(QMainWindow):
             key=str.casefold,
         )
         tree = self.execute_review_tree
+        if self._target_kind == "headparts":
+            self._refresh_headpart_execute_review(selected)
+            return
         tree.blockSignals(True)
         tree.clear()
         try:
@@ -1749,6 +1907,37 @@ class MainWindow(QMainWindow):
                     on_tip, off_tip = FLAG_TOOLTIPS[column]
                     item.setToolTip(
                         column, on_tip if getattr(info, attr) else off_tip)
+        finally:
+            tree.blockSignals(False)
+        self._update_execute_review_table_height(len(selected))
+        QTimer.singleShot(0, lambda count=len(selected):
+                          self._update_execute_review_table_height(count))
+
+    def _refresh_headpart_execute_review(self, selected: list[str]):
+        """Render headpart metadata without exposing BodySlide controls."""
+        tree = self.execute_review_tree
+        rows = getattr(self, "_headpart_rows", {})
+        tree.blockSignals(True)
+        tree.clear()
+        try:
+            for name in selected:
+                row = rows.get(name)
+                item = QTreeWidgetItem(tree)
+                item.setText(0, name)
+                item.setText(1, "Archive" if row and row.kind == "archive"
+                             else (row.sex.capitalize() if row and row.sex else "Unknown"))
+                source_labels = {
+                    "plugin": "Plugin record", "path": "Path", "filename": "Filename",
+                    "paired": "F/M pair", "default": "Default", "unresolved": "Unresolved",
+                    "manual": "Manual override", "archive": "During run",
+                }
+                item.setText(2, "During run" if row and row.kind == "archive"
+                             else (source_labels.get(row.sex_source, row.sex_source)
+                                   if row else "Not scanned"))
+                item.setSizeHint(0, QSize(0, 34))
+                warning = "\n".join(getattr(row, "warnings", [])[:3]) if row else ""
+                if warning:
+                    item.setToolTip(0, f"{name}\n\n{warning}")
         finally:
             tree.blockSignals(False)
         self._update_execute_review_table_height(len(selected))
@@ -1887,6 +2076,9 @@ class MainWindow(QMainWindow):
             button.raise_()
 
     def _toggle_review_header_help(self, button: QToolButton, details: dict):
+        if self._target_kind == "headparts":
+            self._close_review_header_help()
+            return
         existing = getattr(self, "_review_header_popover", None)
         if existing and existing.isVisible():
             existing.close()
@@ -1923,8 +2115,42 @@ class MainWindow(QMainWindow):
 
     def _on_execute_review_clicked(self, item: QTreeWidgetItem, column: int):
         """Open one anchored, themed menu rather than a native combobox editor."""
+        if self._target_kind == "headparts":
+            if column == 1:
+                self._show_headpart_sex_menu(item)
+            return
         if column in (1, 2, 3):
             self._show_review_choice_menu(item, column)
+
+    def _show_headpart_sex_menu(self, item: QTreeWidgetItem):
+        if self.runner.is_running() or item.treeWidget() is not self.execute_review_tree:
+            return
+        name = item.data(0, Qt.UserRole)
+        row = getattr(self, "_headpart_rows", {}).get(name)
+        if not row:
+            return
+        menu = QMenu(self.execute_review_tree)
+        current = row.sex
+        for sex, label in (("female", "Female"), ("male", "Male")):
+            action = menu.addAction(label)
+            action.setData(sex)
+            action.setCheckable(True)
+            action.setChecked(sex == current)
+        picked = menu.exec(self.execute_review_tree.viewport().mapToGlobal(
+            self.execute_review_tree.visualItemRect(item).bottomLeft()))
+        if not picked or picked.data() == current:
+            return
+        row.sex = picked.data()
+        row.sex_source = "manual"
+        row.confidence = "Manual"
+        info = self._scan_data.get(name)
+        if info:
+            info.gender = row.sex.capitalize()
+            info.body_family = row.sex.capitalize()
+            info.confidence = "Manual"
+            info.warnings = [w for w in info.warnings if "Sex could not be determined" not in w]
+        self._refresh_execute_review()
+        self._update_execute_summary()
 
     def _toggle_execute_flag(self, item: QTreeWidgetItem, attr: str):
         """Toggle one per-outfit flag without relying on stock checkbox state."""
@@ -2419,7 +2645,8 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
 
         header = QHBoxLayout()
-        title = QLabel("Outfits")
+        self.groups_card_title = QLabel("Outfits")
+        title = self.groups_card_title
         title.setObjectName("section")
         header.addWidget(title)
         header.addStretch()
@@ -2438,7 +2665,8 @@ class MainWindow(QMainWindow):
 
         group_filter_row = QHBoxLayout()
         group_filter_row.setSpacing(8)
-        group_filter_row.addWidget(_dim("BodySlide group filter"))
+        self.body_group_filter_label = _dim("BodySlide group filter")
+        group_filter_row.addWidget(self.body_group_filter_label)
         self.body_group_filter_combo = QComboBox()
         self.body_group_filter_combo.setToolTip(
             "Filters outfits by their literal SliderGroups XML membership. "
@@ -3255,33 +3483,53 @@ class MainWindow(QMainWindow):
         if self._target_kind == "headparts":
             from core.headpart_sources import scan_rows
             from core.slider_group_reader import SliderGroup
-            root = self._source_input_root or self.config.app_dir
+            if not self._source_input_root:
+                self._effective_tri_root = ""
+                self._all_groups = []
+                self._headpart_rows = {}
+                self._scan_data = {}
+                self._rebuild_tree()
+                self._update_stats()
+                self.lbl_scan_status.setText("Choose a local folder or ZIP containing headpart NIFs")
+                self._groups_loaded = True
+                return
+            root = self._source_input_root
             self._effective_tri_root = str(root)
             # NIFs, not TRIs: a headpart's geometry only exists in its mesh, and
             # plenty of mods ship no .tri at all. The scan stays file-based —
             # reading geometry means dumping every mesh in the mod, which is the
             # run's job, not the scan's.
-            rows = scan_rows(root)
+            rows = scan_rows(root, default_part="unclassified",
+                             default_sex=self._headpart_default_sex())
             names = [row.relpath for row in rows]
             groups = [SliderGroup(name="Headparts (NIF)", members=names)] if names else []
             self._all_groups = groups
+            self._headpart_rows = {row.relpath: row for row in rows}
             self._scan_data = {
                 row.relpath: OutfitInfo(
                     name=row.relpath,
                     # The sex of a headpart, not a body family. The old code put
                     # "3BA"/"HIMBO" here, which are body reference names and
                     # meant nothing for a brow.
-                    gender=(row.sex.capitalize() if row.sex else "Unknown"),
-                    body_family=(row.sex.capitalize() if row.sex else "Unknown"),
+                    gender=("Archive" if row.kind == "archive"
+                            else row.sex.capitalize() if row.sex else "Unknown"),
+                    body_family=("Archive" if row.kind == "archive"
+                                 else row.sex.capitalize() if row.sex
+                                 else "Unknown"),
                     confidence=row.confidence,
-                    mesh_type=row.part.capitalize(),
+                    mesh_type=("BSA" if row.kind == "archive"
+                               else row.part.capitalize()),
                     warnings=list(row.warnings))
                 for row in rows
             }
             self._rebuild_tree()
             self._update_stats()
-            unresolved = sum(1 for row in rows if row.sex is None)
-            status = f"{len(names)} headpart meshes"
+            meshes = [row for row in rows if row.kind == "mesh"]
+            archives = [row for row in rows if row.kind == "archive"]
+            unresolved = sum(1 for row in meshes if row.sex is None)
+            status = f"{len(meshes)} headpart meshes"
+            if archives:
+                status += f" · {len(archives)} archive(s) to read during the run"
             if unresolved:
                 status += f" · {unresolved} with no declared sex"
             self.lbl_scan_status.setText(status)
@@ -3357,6 +3605,43 @@ class MainWindow(QMainWindow):
             return not info or info.status_label in {
                 "Missing project", "Needs Confirmation", "Cannot Patch", "Conflict / Error"
             }
+
+        if self._target_kind == "headparts":
+            members = [name for name in sorted(
+                {member for group in getattr(self, "_all_groups", []) for member in group.members},
+                key=str.casefold)
+                       if not ft or ft in name.lower()]
+            members = [name for name in members if status_matches(name)]
+            if members:
+                view_group = SliderGroup(name=f"Headparts ({len(members)})", members=members)
+                grp_item = TreeItem(self.group_tree)
+                grp_item.setFlags(grp_item.flags() | Qt.ItemIsUserCheckable)
+                selection_key = "__outfits__"
+                selected_members = [m for m in members if (selection_key, m) in self._selected_outfits]
+                grp_item.setCheckState(COL_NAME, Qt.Checked if selected_members and
+                                       len(selected_members) == len(members) else
+                                       Qt.PartiallyChecked if selected_members else Qt.Unchecked)
+                grp_item.setData(COL_NAME, Qt.UserRole, view_group)
+                grp_item.setData(COL_NAME, Qt.UserRole + 1, "headpart-group")
+                grp_item.setData(COL_NAME, Qt.UserRole + 3, members)
+                grp_item.setData(COL_NAME, Qt.UserRole + 4, selection_key)
+                for name in members:
+                    child = TreeItem(grp_item)
+                    child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+                    child.setCheckState(COL_NAME, Qt.Checked if (selection_key, name)
+                                        in self._selected_outfits else Qt.Unchecked)
+                    child.setText(COL_NAME, name)
+                    info = self._scan_data.get(name)
+                    row = getattr(self, "_headpart_rows", {}).get(name)
+                    child.setText(1, row.sex.capitalize() if row and row.sex else "Unknown")
+                    child.setText(2, "Not patched")
+                    child.setData(COL_NAME, Qt.UserRole, name)
+                    child.setData(COL_NAME, Qt.UserRole + 1, "headpart")
+                    child.setData(COL_NAME, Qt.UserRole + 4, selection_key)
+                self._apply_group_badges(grp_item, view_group, members)
+            self._visible_member_names = set(members)
+            self.group_tree.blockSignals(False)
+            return
 
         # SliderGroups XML decides the allowed membership.  The selected group
         # is a filter only; the visible hierarchy is by OSP project so the
@@ -4065,10 +4350,13 @@ class MainWindow(QMainWindow):
         self.stat_outfits.set_value(str(total))
         self.stat_groups.set_value(str(len(checked)))
         self._update_execute_summary()
+        noun = "headpart(s)" if self._target_kind == "headparts" else "outfit(s)"
         if hasattr(self, "review_summary"):
-            self.review_summary.setText(f"{total} outfit(s) selected")
+            self.review_summary.setText(f"{total} {noun} selected")
         n_top = self.group_tree.topLevelItemCount()
-        self.lbl_selected.setText(f"{n_top} projects shown · {total} unique outfits selected")
+        shown = "headpart meshes" if self._target_kind == "headparts" else "unique outfits"
+        prefix = f"{n_top} groups shown" if self._target_kind != "headparts" else f"{n_top} source shown"
+        self.lbl_selected.setText(f"{prefix} · {total} {shown} selected")
 
     # Patch
     # ──────────────────────────────────────────────────────────────────
@@ -4402,7 +4690,30 @@ class MainWindow(QMainWindow):
             return
         self._active_output_dir = out_dir
         self._active_archive_path = archive_path
-        refs = discover_references(self.config.app_dir, self.config.mods_folder)
+        # The executable lives in a separate MO2 tools mod. The active
+        # Physiques files are exposed through the game's virtual Data root, not
+        # beside that executable, so search Data first and keep physical mods
+        # as the standalone fallback.
+        mods_root = self.config.mods_folder
+        if not mods_root:
+            # The normal installation keeps the executable in
+            # <instance>\tools\MPPatcher and the physical providers in
+            # <instance>\mods. Discover that sibling without using stat calls
+            # on the MO2 virtual Data path.
+            for parent in Path(self.config.app_dir).parents:
+                candidate = parent / "mods"
+                try:
+                    if any(candidate.iterdir()):
+                        mods_root = str(candidate)
+                        break
+                except OSError:
+                    continue
+        ref_roots = [self._detect_game_data_path(), self.config.app_dir]
+        refs = None
+        for ref_root in dict.fromkeys(root for root in ref_roots if root):
+            refs = discover_references(ref_root, mods_root)
+            if refs:
+                break
         if not refs:
             self._cleanup_archive_staging()
             QMessageBox.critical(self, "Physiques references not found",
@@ -4414,17 +4725,47 @@ class MainWindow(QMainWindow):
         else:
             exe, args = sys.executable, [os.path.abspath(sys.argv[0])]
         from core.headparts_cli import default_tag
+        rows = getattr(self, "_headpart_rows", {})
         args += ["--headparts", "--mode", "library",
                  "--source", source, "--output-dir", out_dir,
                  "--tag", default_tag(source),
+                 "--part", "unclassified",
+                 "--default-sex", self._headpart_default_sex(),
                  "--female-ref", refs[0], "--male-ref", refs[1]]
-        import tempfile
-        filter_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False,
-                                                   encoding="utf-8")
-        filter_file.write("\n".join(members))
-        filter_file.close()
-        self._temp_files.add(filter_file.name)
-        args += ["--filter-file", filter_file.name]
+        manual_rows = [row for row in rows.values()
+                       if getattr(row, "sex_source", "") == "manual"]
+        if manual_rows:
+            import tempfile
+            override_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8")
+            override_file.write("\n".join(
+                f"{row.relpath}\t{row.sex}" for row in manual_rows))
+            override_file.close()
+            self._temp_files.add(override_file.name)
+            args += ["--sex-overrides", override_file.name]
+        # Meshes inside a BSA are only known once the run opens it, so they can
+        # never appear in the filter. Including them is conditional on the user
+        # having checked at least one archive row — otherwise a mod with a few
+        # loose NIFs beside a large archive reported success over the few.
+        archive_rows = [name for name in members
+                        if getattr(rows.get(name), "kind", "mesh") == "archive"]
+        args += ["--archives", "all" if archive_rows else "none"]
+
+        # No filter at all when every row is checked: it would list every mesh
+        # in the mod in order to say "all of them", and the run walks the same
+        # tree anyway. Passing one unconditionally is also half of what hid a
+        # mod's archive content, since a filter can only ever name loose paths.
+        mesh_rows = {name for name, row in rows.items()
+                     if getattr(row, "kind", "mesh") == "mesh"}
+        if sorted(members) != sorted(rows):
+            import tempfile
+            filter_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8")
+            filter_file.write("\n".join(name for name in members
+                                        if name in mesh_rows))
+            filter_file.close()
+            self._temp_files.add(filter_file.name)
+            args += ["--filter-file", filter_file.name]
         self._headpart_mode_active = True
         self._pending_runs = []
         self._patch_total = len(members)
@@ -4633,6 +4974,34 @@ class MainWindow(QMainWindow):
         self._refresh_backup_list()
         if not was_headparts:
             self._start_scan()
+        if exit_code == 0 and not cancelled:
+            output_target = archive_created or output_root
+            if output_target:
+                self._show_output_completion_dialog(output_target, bool(archive_created))
+        elif exit_code != 0 and not cancelled:
+            QMessageBox.critical(
+                self, "MPPatcher — Processing failed",
+                f"The patch process stopped with exit code {exit_code}.\n\n"
+                "Check the Activity Log for the exact error.")
+
+    def _show_output_completion_dialog(self, output_target: str, is_archive: bool):
+        """Give every successful run an explicit, actionable completion state."""
+        label = "ZIP archive" if is_archive else "output folder"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("MPPatcher — Processing complete")
+        box.setText(f"Processing finished successfully.\n\n{label}:\n{output_target}")
+        show_button = box.addButton("Show in Explorer", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() is show_button:
+            try:
+                if is_archive:
+                    subprocess.Popen(["explorer.exe", "/select,", os.path.normpath(output_target)])
+                else:
+                    os.startfile(output_target)
+            except OSError as exc:
+                self._log_warning(f"Could not open output in Explorer: {exc}")
 
     def _tick_elapsed(self):
         self._elapsed_secs += 1
@@ -4689,7 +5058,8 @@ class MainWindow(QMainWindow):
         if status == "PATCH":
             self.lbl_current_outfit.setText(name)
             return
-        if status in {"DONE", "PATCHED", "SKIP", "ERROR"} and name not in self._terminal_status:
+        if (status in {"DONE", "PATCHED", "SKIP", "SKIPPED", "ERROR", "FAILED"}
+                and name not in self._terminal_status):
             self._terminal_status[name] = status
             self._patch_done = len(self._terminal_status)
             total = max(1, getattr(self, "_patch_total", 0))
@@ -4703,8 +5073,10 @@ class MainWindow(QMainWindow):
     def _update_result_summary(self):
         statuses = getattr(self, "_terminal_status", {})
         done = sum(1 for status in statuses.values() if status in {"DONE", "PATCHED"})
-        skipped = sum(1 for status in statuses.values() if status == "SKIP")
-        failed = sum(1 for status in statuses.values() if status == "ERROR")
+        skipped = sum(1 for status in statuses.values()
+                      if status in {"SKIP", "SKIPPED"})
+        failed = sum(1 for status in statuses.values()
+                     if status in {"ERROR", "FAILED"})
         warnings = getattr(self, "_warning_count", 0)
         if hasattr(self, "lbl_result_summary"):
             self.lbl_result_summary.setText(

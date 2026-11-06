@@ -237,9 +237,9 @@ either can be replaced without rebuilding the Python side:
 | `mppatcher-cli.exe` | the outfit pipeline |
 | `nifdump.exe` | Headparts library mode |
 
-Both come from the same CMake project. `nifdump.exe` is resolved from the exe's
-own directory first, then its parent, then the `MPP_NIFDUMP` environment
-variable — the same order `mppatcher-cli.exe` uses, which matters under Mod
+Both come from the same CMake project. `nifdump.exe` is resolved from the
+`MPP_NIFDUMP` environment variable first, then the exe's own directory, then its
+parent — the directory order `mppatcher-cli.exe` uses, which matters under Mod
 Organizer because its virtual file system hooks directory enumeration but not
 the stat family.
 
