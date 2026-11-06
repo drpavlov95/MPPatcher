@@ -21,9 +21,10 @@ if ROOT not in sys.path:
 
 from core.headpart_library import (
     DEFAULT_CLUSTER_LIMIT, DEFAULT_PRESET, HEAD_OFFSET, MIN_VERTS, MORPHS,
-    SAME_MESH_LIMIT, ShapeInput, WrapPreset, build_set, centred_mean_distance,
-    cluster_geometries, load_head_reference, minimal_tri, pick_frame,
-    reject_reason, verify_against_clusters,
+    MORPHS_SUBDIR, SAME_MESH_LIMIT, LibraryOptions, ShapeInput, WrapPreset,
+    build_library, build_set, centred_mean_distance, cluster_geometries,
+    load_head_reference, minimal_tri, pick_frame, reject_reason, sanitize_tag,
+    set_filename, verify_against_clusters, write_manifest,
 )
 from fmp.morphs import make_morph
 from fmp.tri import TriFile, read_tri, write_tri
@@ -457,6 +458,213 @@ class BuildSetTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "99"):
                     build_set(ref, self._cluster(verts), preset=DEFAULT_PRESET,
                               frame=pick_frame(ref, verts))
+
+
+class SetFilenameTests(unittest.TestCase):
+    def test_a_set_filename_encodes_tag_sex_and_vertex_count(self):
+        self.assertEqual(set_filename("BG3", "female", 4014, set()),
+                         "RLY_BG3_F_4014.tri")
+        self.assertEqual(set_filename("BG3", "male", 4014, set()),
+                         "RLY_BG3_M_4014.tri")
+
+    def test_two_geometries_sharing_a_vertex_count_get_distinct_names(self):
+        # The plugin stores a vector per (sex, vertex count) and picks the
+        # closest, so shipping several is correct — but the manifest dedupes by
+        # filename, so they must not collide.
+        used: set[str] = set()
+        first = set_filename("BG3", "female", 4014, used)
+        second = set_filename("BG3", "female", 4014, used)
+        third = set_filename("BG3", "female", 4014, used)
+        self.assertEqual([first, second, third],
+                         ["RLY_BG3_F_4014.tri", "RLY_BG3_F_4014_b.tri",
+                          "RLY_BG3_F_4014_c.tri"])
+
+    def test_a_tag_is_reduced_to_filename_safe_characters(self):
+        self.assertEqual(sanitize_tag("BG3 Some Hairs v1.1!"),
+                         "BG3SomeHairsv11")
+        self.assertEqual(sanitize_tag("   "), "Mod")
+
+
+class ManifestTests(unittest.TestCase):
+    def test_the_manifest_carries_one_sets_block_per_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "PhysiquesOfSkyrim_BG3.toml")
+            write_manifest(path, [("RLY_BG3_F_10.tri", "female", "hair"),
+                                  ("RLY_BG3_M_10.tri", "male", "facialhair")],
+                           tag="BG3")
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+            self.assertEqual(text.count("[[sets]]"), 2)
+            self.assertIn('file = "RLY_BG3_F_10.tri"', text)
+            self.assertIn('sex  = "male"', text)
+            self.assertIn('part = "facialhair"', text)
+            self.assertIn("BG3", text.splitlines()[0])
+
+    def test_the_manifest_is_valid_toml(self):
+        import tomllib
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "m.toml")
+            write_manifest(path, [("a.tri", "female", "hair")], tag="X")
+            with open(path, "rb") as handle:
+                parsed = tomllib.load(handle)
+            self.assertEqual(parsed["sets"],
+                             [{"file": "a.tri", "sex": "female",
+                               "part": "hair"}])
+
+
+class BuildLibraryTests(unittest.TestCase):
+    MORPHS_IN = [("RLY_Heavy", 1.0), ("RLY_Muscular", 2.0), ("RLY_Thin", 3.0)]
+
+    def _refs(self, folder):
+        return {
+            sex: load_head_reference(
+                _write_reference(folder, f"ref_{sex}.tri", self.MORPHS_IN), sex)
+            for sex in ("female", "male")}
+
+    def _near(self, n: int = 12, *, offset: float = 0.5, seed: int = 11):
+        rng = np.random.default_rng(seed)
+        xy = rng.uniform(-4.0, 4.0, size=(n, 2))
+        return np.column_stack([xy, np.full(n, HEAD_OFFSET[2] + offset)])
+
+    def _out(self, folder):
+        return os.path.join(folder, MORPHS_SUBDIR)
+
+    def test_writes_tris_and_one_manifest_under_the_morphs_subdir(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near()),
+                      _shape("b.nif", self._near(seed=12), sex="male")]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="TEST"))
+            written = sorted(os.listdir(self._out(folder)))
+            self.assertEqual(written, ["PhysiquesOfSkyrim_TEST.toml",
+                                       "RLY_TEST_F_12.tri",
+                                       "RLY_TEST_M_12.tri"])
+            self.assertEqual(summary.sets, 2)
+            self.assertEqual(summary.verified, 2)
+            self.assertEqual(summary.unmatched, [])
+            self.assertEqual([f.status for f in report.files],
+                             ["patched", "patched"])
+
+    def test_a_file_result_is_labelled_by_relpath_and_shape(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near(), shape="HairA")]
+            report, _summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].relpath, "a.nif#HairA")
+
+    def test_members_of_one_cluster_all_point_at_the_same_set(self):
+        verts = self._near()
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", verts), _shape("b.nif", verts.copy())]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(summary.sets, 1)
+            outputs = {os.path.basename(f.output) for f in report.files}
+            self.assertEqual(outputs, {"RLY_T_F_12.tri"})
+
+    def test_a_dry_run_writes_nothing_but_still_reports_the_set_count(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near())]
+            _report, summary = build_library(
+                shapes, self._refs(folder), folder,
+                LibraryOptions(tag="T", dry_run=True))
+            self.assertEqual(summary.sets, 1)
+            self.assertGreater(summary.bytes_written, 0)
+            self.assertFalse(os.path.isdir(self._out(folder)))
+            self.assertIsNone(summary.manifest)
+
+    def test_an_unclassified_shape_is_skipped_with_a_warning_by_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near(), sex=None)]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].status, "skipped")
+            self.assertTrue(report.files[0].warnings)
+            self.assertEqual(summary.sets, 0)
+
+    def test_unclassified_both_ships_the_shape_for_both_sexes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", self._near(), sex=None)]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder,
+                LibraryOptions(tag="T", unclassified_both=True))
+            self.assertEqual(summary.sets, 2)
+            self.assertEqual(report.files[0].status, "patched")
+            names = sorted(os.path.basename(p)
+                           for p in os.listdir(self._out(folder))
+                           if p.endswith(".tri"))
+            self.assertEqual(names, ["RLY_T_F_12.tri", "RLY_T_M_12.tri"])
+
+    def test_a_placeholder_shape_is_skipped_with_its_reason(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("stub.nif", _grid(4))]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].status, "skipped")
+            self.assertIn("placeholder", " ".join(report.files[0].warnings))
+            self.assertEqual(summary.sets, 0)
+
+    def test_a_shape_detached_from_the_head_is_skipped_not_shipped_as_zeros(self):
+        # The measured case: six of 240 real shapes come no closer than 14.5
+        # units to the head in either frame. Past the falloff radius every
+        # delta is zero by construction, so a set for them is a file of zeros
+        # and leaving it out leaves the game behaving identically.
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("braid.nif", self._near(offset=30.0))]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].status, "skipped")
+            self.assertIn("detached", " ".join(report.files[0].warnings))
+            self.assertEqual(summary.sets, 0)
+
+    def test_a_detached_shape_is_shipped_when_the_falloff_is_disabled(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("braid.nif", self._near(offset=30.0))]
+            _report, summary = build_library(
+                shapes, self._refs(folder), folder,
+                LibraryOptions(tag="T", falloff=None))
+            self.assertEqual(summary.sets, 1)
+
+    def test_a_sex_with_no_reference_head_fails_rather_than_silently_skips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            refs = self._refs(folder)
+            del refs["male"]
+            shapes = [_shape("m.nif", self._near(), sex="male")]
+            report, summary = build_library(
+                shapes, refs, folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files[0].status, "failed")
+            self.assertIn("male", report.files[0].error)
+            self.assertEqual(summary.sets, 0)
+
+    def test_a_run_whose_verification_leaves_a_shape_unmatched_fails_it(self):
+        # Clustering far looser than the plugin's acceptance ships one set for
+        # two geometries the plugin would not both match.
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("a.nif", _grid(30, scale=4.0, seed=1)),
+                      _shape("b.nif", _grid(30, scale=4.0, seed=2))]
+            report, summary = build_library(
+                shapes, self._refs(folder), folder,
+                LibraryOptions(tag="T", cluster_limit=1000.0, falloff=None))
+            self.assertEqual(summary.sets, 1)
+            self.assertTrue(summary.unmatched)
+            self.assertIn("failed", [f.status for f in report.files])
+
+    def test_the_summary_reports_the_frame_split_and_wrap_distances(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shapes = [_shape("head.nif", self._near()),
+                      _shape("origin.nif", self._near(seed=13) - HEAD_OFFSET)]
+            _report, summary = build_library(
+                shapes, self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(summary.frames, {"head": 1, "origin": 1})
+            self.assertEqual(summary.shapes, 2)
+            self.assertAlmostEqual(summary.median_wrap_p50, 0.5, places=3)
+
+    def test_no_shapes_at_all_produces_an_empty_report_not_an_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report, summary = build_library(
+                [], self._refs(folder), folder, LibraryOptions(tag="T"))
+            self.assertEqual(report.files, [])
+            self.assertEqual((summary.sets, summary.shapes), (0, 0))
 
 
 class RejectTests(unittest.TestCase):
