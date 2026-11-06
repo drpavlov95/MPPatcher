@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from core.headpart_classify import classify, collect_stems
 from fmp.morphs import find_morph
 from fmp.transfer import transfer_morphs
 from fmp.pipeline import BatchConfig, run_batch
@@ -62,17 +63,28 @@ def scan_headparts(root: str | os.PathLike[str]) -> list[Path]:
     return sorted(out)
 
 
-def detect_headpart_sex(path: Path | str) -> str:
-    """Return ``female``, ``male`` or ``unknown`` without substring traps."""
+def detect_headpart_sex(path: Path | str, *,
+                        stems: frozenset[str] = frozenset()) -> str:
+    """Return ``female``, ``male`` or ``unknown`` without substring traps.
+
+    Delegates to :func:`core.headpart_classify.classify`, which strips one
+    trailing character rather than matching a separator — so BG3's
+    ``gortash_hair F.tri`` pairs with ``gortash_hair M.tri`` the same way
+    vanilla's ``HairShortHumanF`` pairs with ``...M``. The old rule tested for
+    ``_f``/``f_`` and read 28 of that mod's 38 files as unknown.
+
+    *stems* is every other name in the same scan, which the pairing rule needs:
+    a trailing letter is only evidence when the opposite file exists. Called
+    without it, the function stays as conservative as it always was.
+    """
     text = str(path).lower().replace("\\", "/")
-    stem = Path(text).stem
-    # Test female first: ``female`` contains the substring ``male``.
-    if ("female" in stem or "/female/" in text or "_female" in stem
-            or stem.startswith("f_") or stem.endswith("_f")):
-        return "female"
-    if ("male" in stem or "/male/" in text or "_male" in stem
-            or stem.startswith("m_") or stem.endswith("_m")
-            or "beard" in stem or "/beards/" in text):
+    # Beards carry no sex in the name but are male by nature. classify has no
+    # such rule — it is specific to this legacy TRI path — so it is checked
+    # here, after the explicit female tests inside classify cannot be fooled.
+    found = classify(str(path), stems=stems)
+    if found.sex:
+        return found.sex
+    if "beard" in Path(text).stem or "/beards/" in text:
         return "male"
     return "unknown"
 
@@ -106,8 +118,14 @@ def patch_headparts(source_root: str, output_dir: str, female_ref: str,
     cfg = BatchConfig(targets=[source], output_dir=Path(output_dir),
                       dry_run=dry_run, include=["*.tri"], recursive=True)
 
+    # The trailing-letter pairing rule needs to know what else the scan holds:
+    # "gortash_hair F.tri" is only female because "gortash_hair M.tri" is there
+    # too. Collected from every target, not just the selected ones, so filtering
+    # the run down to one file does not change how its name reads.
+    stems = collect_stems(scan_headparts(source))
+
     def process(tri, result):
-            sex = detect_headpart_sex(Path(result.path))
+            sex = detect_headpart_sex(Path(result.path), stems=stems)
             if sex == "unknown":
                 result.warnings.append(
                     "Could not determine headpart sex from the path; skipped for safety.")
