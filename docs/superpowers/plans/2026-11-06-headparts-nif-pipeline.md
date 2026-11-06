@@ -382,10 +382,7 @@ git commit -m "feat(headparts): load head references by morph name and measure t
 - Consumes: `fmp.wrap.wrap_deltas`, `fmp.morphs.make_morph`, `fmp.tri.TriFile`, `fmp.tri.write_tri`, `fmp.tri.read_tri`.
 - Produces:
   - `@dataclass WrapPreset: name: str; falloff: float | None; falloff_inner: float; smooth: int`
-  - `PRESETS: dict[str, WrapPreset]` holding exactly two entries:
-    - `"standoff"` = `WrapPreset("standoff", falloff=14.0, falloff_inner=4.0, smooth=0)`
-    - `"onskin"` = `WrapPreset("onskin", falloff=None, falloff_inner=0.0, smooth=0)`
-  - `preset_for_part(part: str) -> WrapPreset` — `hair` and `facialhair` → `standoff`; everything else → `onskin`.
+  - `DEFAULT_PRESET = WrapPreset("default", falloff=14.0, falloff_inner=4.0, smooth=0)` — one preset for every part. See the Task 3/6 ruling in the ledger: measurement showed a second on-skin preset makes a bit-identical difference for brows and 0.0093 units for hair, and selecting it from the `HDPT` part type is unsafe on real data.
   - `minimal_tri(verts: np.ndarray) -> TriFile`
   - `@dataclass BuiltSet: data: bytes; metrics: dict[str, float]`
   - `build_set(ref: HeadReference, cluster: GeometryCluster, *, preset: WrapPreset, frame: FrameChoice) -> BuiltSet` — raises `ValueError` if the written bytes do not read back with the right vertex count and exactly `MORPHS` in order.
@@ -393,22 +390,22 @@ git commit -m "feat(headparts): load head references by morph name and measure t
 - [ ] **Step 1: Write the failing preset and codec tests**
 
 ```python
-def test_hair_and_facialhair_use_the_standoff_preset(self):
-def test_eyebrows_and_misc_use_the_onskin_preset(self):
+def test_the_default_preset_carries_the_measured_falloff_numbers(self):
+    # falloff 14.0, falloff_inner 4.0, smooth 0
 def test_a_minimal_tri_round_trips_with_no_faces(self):
     # write_tri -> read_tri; vertex_count preserved, len(faces) == 0
 ```
 
-- [ ] **Step 2: Run to verify it fails, then implement `PRESETS`, `preset_for_part`, `minimal_tri`**
+- [ ] **Step 2: Run to verify it fails, then implement `DEFAULT_PRESET` and `minimal_tri`**
 
 - [ ] **Step 3: Write the failing `build_set` tests**
 
 ```python
 def test_a_built_set_carries_exactly_the_three_morphs_in_order(self):
     self.assertEqual(read_tri(built.data).morph_names(), list(MORPHS))
-def test_the_onskin_preset_keeps_full_delta_for_a_vertex_on_the_surface(self):
+def test_a_vertex_lying_on_the_surface_keeps_the_full_delta(self):
     # vertex 0.03 off a reference whose RLY_Heavy is a uniform 1.0 -> delta ~1.0
-def test_the_standoff_preset_zeroes_a_vertex_beyond_the_falloff(self):
+def test_a_vertex_beyond_the_falloff_is_zeroed(self):
     # vertex 20 units out -> delta magnitude 0.0
 def test_a_vertex_count_mismatch_in_the_readback_raises(self):
 ```

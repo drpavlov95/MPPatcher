@@ -45,8 +45,13 @@ Two separate failures produce the BG3 number:
   `patch_headparts` skips the file "for safety".
 
 The mod's own plugin resolves all 50 meshes with no ambiguity: 54 `HDPT` records
-covering 50 meshes, 27 female and 27 male, each with a part type. Sex and part
-type are plugin facts, and reading them removes the guessing entirely.
+covering 50 meshes, resolving 25 female and 25 male, each with a part type. Sex
+and part type are plugin facts, and reading them removes the guessing entirely.
+Measured across four installed mods, the plugin decides 310 of 311 meshes —
+BG3 50/50, Even More Brows 2/2, ApachiiSkyHair 190/190, Cyberpunk 2077 Hairs
+68/69. The one holdout, `rogueHaircap.nif`, carries no `HDPT` record at all: no
+headpart references it, so there is nothing to decide from and it is reported
+rather than guessed.
 
 The `.tri` files a mod ships are not a usable geometry source. In BG3 hairs all
 38 happen to match their NIF vertex counts but carry **zero morphs**; Vanilla
@@ -176,12 +181,22 @@ land on unrelated head vertices, which shears the mesh along the boundary.
 Wrapping interpolates across the containing triangle, so the field is
 continuous.
 
-One kernel, two parameter presets, chosen from the part type:
+One kernel, one set of falloff parameters for every part: full delta out to 4.0
+units from the reference surface, ramping to zero at 14.0 on a smoothstep. A
+strand hanging in the air has nothing to follow, and carrying the skin's full
+displacement out there only distorts the silhouette; anything lying against the
+skin is inside the inner radius and gets the full field.
 
-| preset | parts | falloff | why |
-|---|---|---|---|
-| `standoff` | hair, facialhair | full to 4, zero at 14 | a strand hanging in the air has nothing to follow; carrying the skin's full displacement out there distorts the silhouette |
-| `onskin` | eyebrows, scar, eyes, misc | none | measured at 0.03 units off the surface; these inherit the skin's displacement in full |
+An earlier draft of this design had a second, falloff-free preset for parts that
+sit on the skin, selected from the part type. Measurement killed it. For the Even
+More Brows meshes, which sit 0.03 units off the surface, the two presets produce
+**bit-identical** deltas (maximum difference 0.000000); for BG3's gortash hair
+(median 1.02 off the skull, maximum 4.77) they differ by 0.0093 units. The
+mapping was also actively unsafe: BG3 declares its hair-*highlight* mesh as
+`HDPT` part `misc`, which would have handed the on-skin preset to geometry that
+stands off the skull exactly like the hair it belongs to. The part type is a
+label, not a measurement of standoff, so it does not choose the kernel. The
+falloff numbers are run options for the cases measurement has not covered.
 
 Each written TRI is read straight back before the run is called a success — a
 file MPF cannot parse is worse than no file. Output TRIs are minimal: base
