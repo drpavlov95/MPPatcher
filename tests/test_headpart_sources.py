@@ -1,0 +1,150 @@
+"""Coverage for what a headpart source tree actually contains.
+
+Three layouts all have to work: loose NIFs under `meshes\\`, a mod that ships
+nothing loose at all (Beards of Power is a 911 MB BSA), and a ZIP the caller has
+already staged. The plugin matters as much as the meshes — `HDPT` records are the
+only reliable source of a mesh's sex — so plugins are discovered here rather than
+asked for.
+"""
+import os
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from core.headpart_sources import discover, stage_archive_nifs
+
+
+def _make(root: str, *relatives: str) -> None:
+    for relative in relatives:
+        path = os.path.join(root, relative.replace("/", os.sep))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(b"x")
+
+
+class DiscoverTests(unittest.TestCase):
+    def test_finds_nifs_archives_and_plugins_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder,
+                  "meshes/actors/character/hair/A.NIF",
+                  "meshes/actors/character/hair/b.nif",
+                  "Thing.Bsa", "Mod.ESP", "Light.esl", "Master.esm",
+                  "textures/hair.dds")
+            found = discover(folder)
+            self.assertEqual(
+                sorted(p.replace(os.sep, "/") for p in found.loose_nifs),
+                ["meshes/actors/character/hair/A.NIF",
+                 "meshes/actors/character/hair/b.nif"])
+            self.assertEqual([os.path.basename(p) for p in found.archives],
+                             ["Thing.Bsa"])
+            self.assertEqual(
+                sorted(os.path.basename(p) for p in found.plugins),
+                ["Light.esl", "Master.esm", "Mod.ESP"])
+
+    def test_archives_and_plugins_are_absolute_nifs_are_relative(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/a.nif", "Mod.esp", "Mod.bsa")
+            found = discover(folder)
+            self.assertFalse(os.path.isabs(found.loose_nifs[0]))
+            self.assertTrue(os.path.isabs(found.archives[0]))
+            self.assertTrue(os.path.isabs(found.plugins[0]))
+
+    def test_ignores_backup_and_generated_morph_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder,
+                  "backup/meshes/old.nif",
+                  "SKSE/Plugins/MPF/morphs/RLY_X_F_100.tri",
+                  "SKSE/Plugins/MPF/morphs/stale.nif",
+                  "backup/Mod.esp")
+            found = discover(folder)
+            self.assertEqual(found.loose_nifs, [])
+            self.assertEqual(found.plugins, [])
+
+    def test_an_empty_tree_discovers_nothing_without_raising(self):
+        with tempfile.TemporaryDirectory() as folder:
+            found = discover(folder)
+            self.assertEqual(
+                (found.loose_nifs, found.archives, found.plugins), ([], [], []))
+            self.assertEqual(found.root, folder)
+
+    def test_a_missing_root_discovers_nothing_without_raising(self):
+        found = discover(os.path.join(tempfile.gettempdir(), "no-such-mod-dir"))
+        self.assertEqual(found.loose_nifs, [])
+
+
+class StageArchiveNifsTests(unittest.TestCase):
+    def test_each_archive_is_staged_into_its_own_subfolder(self):
+        seen = []
+
+        def extract(archives, out_root, **kwargs):
+            seen.append((archives, out_root, kwargs.get("suffix")))
+            return 3, []
+
+        with tempfile.TemporaryDirectory() as folder:
+            work = os.path.join(folder, "work")
+            roots, failures = stage_archive_nifs(
+                [os.path.join(folder, "Hair.bsa"),
+                 os.path.join(folder, "Beards.bsa")],
+                work, extract=extract)
+            self.assertEqual(failures, [])
+            self.assertEqual([os.path.basename(r) for r in roots],
+                             ["Hair", "Beards"])
+            self.assertEqual([entry[2] for entry in seen], [".nif", ".nif"])
+            self.assertEqual([entry[0][0].endswith("Hair.bsa") for entry in seen],
+                             [True, False])
+
+    def test_an_archive_that_yields_no_nifs_is_not_staged(self):
+        def extract(_archives, _out_root, **_kwargs):
+            return 0, []
+
+        with tempfile.TemporaryDirectory() as folder:
+            roots, failures = stage_archive_nifs(
+                [os.path.join(folder, "Sounds.bsa")],
+                os.path.join(folder, "work"), extract=extract)
+            self.assertEqual((roots, failures), ([], []))
+
+    def test_an_extract_failure_is_collected_not_raised(self):
+        def extract(archives, _out_root, **_kwargs):
+            if "Broken" in archives[0]:
+                raise ValueError("unsupported BSA version 42")
+            return 2, []
+
+        with tempfile.TemporaryDirectory() as folder:
+            roots, failures = stage_archive_nifs(
+                [os.path.join(folder, "Broken.bsa"),
+                 os.path.join(folder, "Good.bsa")],
+                os.path.join(folder, "work"), extract=extract)
+            self.assertEqual([os.path.basename(r) for r in roots], ["Good"])
+            self.assertEqual(len(failures), 1)
+            self.assertIn("unsupported BSA version 42", failures[0])
+            self.assertIn("Broken.bsa", failures[0])
+
+    def test_per_entry_failures_reported_by_extract_are_carried_through(self):
+        def extract(_archives, _out_root, **_kwargs):
+            return 1, ["hair\\a.nif: LZ4 frame error"]
+
+        with tempfile.TemporaryDirectory() as folder:
+            roots, failures = stage_archive_nifs(
+                [os.path.join(folder, "Hair.bsa")],
+                os.path.join(folder, "work"), extract=extract)
+            self.assertEqual(len(roots), 1)
+            self.assertEqual(failures, ["hair\\a.nif: LZ4 frame error"])
+
+    def test_two_archives_sharing_a_stem_get_distinct_staging_roots(self):
+        def extract(_archives, _out_root, **_kwargs):
+            return 1, []
+
+        with tempfile.TemporaryDirectory() as folder:
+            roots, _failures = stage_archive_nifs(
+                [os.path.join(folder, "a", "Hair.bsa"),
+                 os.path.join(folder, "b", "Hair.bsa")],
+                os.path.join(folder, "work"), extract=extract)
+            self.assertEqual(len(set(roots)), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
