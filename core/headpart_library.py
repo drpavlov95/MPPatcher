@@ -17,10 +17,21 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
+from fmp.morphs import find_morph
+from fmp.tri import read_tri
+
 MORPHS = ("RLY_Heavy", "RLY_Muscular", "RLY_Thin")
+
+# Translation from the MPF head frame — where the head TRIs are authored, near
+# z=120 — to the headpart frame. Headparts are shipped either origin-centred or
+# at head height, and a mod is not always self-consistent: Beards of Power ships
+# 83 shapes at head height and 94 at the origin. The frames are ~120 units
+# apart, so which one a shape is in is measured per shape, never declared.
+HEAD_OFFSET = np.array([0.0, -1.633, 120.555])
 
 # The plugin's own acceptance threshold.
 SAME_MESH_LIMIT = 3.0
@@ -65,6 +76,35 @@ class GeometryCluster:
 
 
 @dataclass
+class HeadReference:
+    """A reference head, its RLY_* fields, and both candidate frames."""
+
+    sex: str
+    verts: np.ndarray
+    faces: np.ndarray
+    deltas: dict[str, np.ndarray]
+    surface_head: np.ndarray             # as authored, at head height
+    surface_origin: np.ndarray           # translated to origin-centred
+
+
+@dataclass
+class FrameChoice:
+    """Which frame a shape turned out to be in, and how well it fits."""
+
+    surface: np.ndarray
+    name: str
+    median_distance: float
+    # Where the shape comes closest to the head: the 5th percentile of its
+    # vertex distances, in the chosen frame. A headpart is attached to the head
+    # somewhere, so this is near zero for one — measured across 240 real shapes,
+    # 234 contact within 1.0 unit. The six that do not sit at 14.5 to 31.4, with
+    # nothing in between, and for those the frame choice is close to a coin flip
+    # because neither frame puts them against the skin. This is the number that
+    # says so.
+    contact_distance: float = 0.0
+
+
+@dataclass
 class VerifyResult:
     """What replaying the plugin's matching found."""
 
@@ -85,6 +125,69 @@ def centred_mean_distance(a: np.ndarray, b: np.ndarray) -> float:
     a = a - a.mean(0)
     b = b - b.mean(0)
     return float(np.linalg.norm(a - b, axis=1).mean())
+
+
+def load_head_reference(path: str, sex: str) -> HeadReference:
+    """Read a reference head TRI and keep the three RLY_* fields from it.
+
+    Morphs are looked up by name, never by position. The shipped
+    ``FACE_FemaleHead.tri`` holds ``['OLD_Heavy', 'RLY_Muscular', 'RLY_Thin',
+    'RLY_Heavy']`` — a stale morph first and RLY_Heavy last — so reading by
+    index would write the wrong field under the right name, and no downstream
+    check could tell.
+    """
+    source = Path(path)
+    tri = read_tri(source.read_bytes(), source=str(source))
+
+    absent = [name for name in MORPHS if find_morph(tri, name) is None]
+    if absent:
+        raise ValueError(
+            f"{source.name} carries no {', '.join(absent)}; it is not a current "
+            f"Physiques of Skyrim head reference (it has: "
+            f"{', '.join(tri.morph_names()) or 'no morphs at all'})")
+    if len(tri.faces) == 0:
+        raise ValueError(
+            f"{source.name} carries no faces, and a surface wrap has nothing "
+            "to sample without them")
+
+    verts = tri.verts.astype(np.float64)
+    return HeadReference(
+        sex=sex, verts=verts, faces=np.asarray(tri.faces, dtype=np.int64),
+        deltas={name: find_morph(tri, name).deltas() for name in MORPHS},
+        surface_head=verts, surface_origin=verts - HEAD_OFFSET)
+
+
+def pick_frame(ref: HeadReference, verts: np.ndarray, *,
+               sample: int = 256) -> FrameChoice:
+    """Choose the frame a shape is in, by which one puts it against the skin.
+
+    Decided on a subsample: the two frames are a whole body length apart, so
+    256 vertices settle it, while querying every vertex against both surfaces
+    would double the cost of the entire run.
+    """
+    from fmp.wrap import closest_surface_samples
+
+    verts = np.asarray(verts, dtype=np.float64)
+    if not len(verts):
+        return FrameChoice(ref.surface_head, "head", float("inf"),
+                           float("inf"))
+
+    picked = np.linspace(0, len(verts) - 1,
+                         min(sample, len(verts))).astype(np.int64)
+    probe = verts[picked]
+
+    best = FrameChoice(ref.surface_head, "head", float("inf"), float("inf"))
+    for surface, name in ((ref.surface_head, "head"),
+                          (ref.surface_origin, "origin")):
+        _tri, _bary, dist = closest_surface_samples(surface, ref.faces, probe,
+                                                    k=4)
+        if not len(dist):
+            continue
+        median = float(np.median(dist))
+        if median < best.median_distance:
+            best = FrameChoice(surface, name, median,
+                               float(np.percentile(dist, 5)))
+    return best
 
 
 def reject_reason(shape: ShapeInput) -> str | None:
