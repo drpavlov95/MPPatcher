@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from core.config import vfs_find
+from core.vfs import app_directory, vfs_find
 from fmp.nifdump import NifDumpError, read_dump
 
 NIFDUMP_NAMES = ("nifdump.exe", "nifdump")
@@ -75,8 +75,13 @@ class DumpRun:
     failures: list[str] = field(default_factory=list)
 
 
-def find_nifdump(app_dir: str) -> str:
+def find_nifdump(app_dir: str = "") -> str:
     """Return a usable `nifdump` path, or '' when none can be reached.
+
+    Defaults to this program's own directory, then its parent — the same order
+    :attr:`core.config.Config.mppatcher_cli_exe` uses for the native CLI, which
+    covers both deployment layouts (the exe beside BodySlide, and the exe in its
+    own subfolder).
 
     The operator override is returned as given and is not probed: an exported
     path is a deliberate choice of binary, and silently ignoring a typo in it
@@ -85,6 +90,7 @@ def find_nifdump(app_dir: str) -> str:
     override = os.environ.get(ENV_OVERRIDE, "").strip()
     if override:
         return override
+    app_dir = app_dir or app_directory()
     if not app_dir:
         return ""
     # Enumeration only. MO2's usvfs hooks FindFirstFileW but not the stat

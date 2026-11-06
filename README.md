@@ -144,20 +144,53 @@ from them.
 
 ## Headparts mode
 
-The GUI can patch a folder or ZIP containing headpart `.tri` files. It finds
-the female and male Physiques of Skyrim references from the active Data/VFS
-tree and transfers `RLY_Heavy`, `RLY_Muscular`, and `RLY_Thin`.
+Point the Headparts target at a mod folder or ZIP — hair, brows, beards,
+earrings, jewellery — and MPPatcher reads the mod's **NIFs** and writes a
+Physiques of Skyrim morph library for them. Mods that ship no `.tri` at all are
+patched like any other, which is most of them.
 
-The same operation is available from the command line:
+The output is a mod folder you can enable directly:
+
+```
+<output>/SKSE/Plugins/MPF/morphs/RLY_<TAG>_<F|M>_<vertexcount>.tri
+<output>/SKSE/Plugins/MPF/morphs/PhysiquesOfSkyrim_<TAG>.toml
+```
 
 ```powershell
 python mppatcher.py --headparts `
-  --source "C:\path\to\headparts.zip" `
-  --output-dir "C:\path\to\patched-headparts"
+  --source "C:\path\to\HairMod" `
+  --output-dir "C:\path\to\HairMod - Physique Patch" `
+  --tag HAIRMOD
 ```
 
-Useful options include `--only-missing`, `--female-ref`, `--male-ref`, and
-`--filter-file`.
+`nifdump.exe` must sit beside `MPPatcher.exe` — it is built by the same project
+as `mppatcher-cli.exe`. Without it the run stops and says so; it never falls
+back to reading the `.tri` files a mod ships, because those are routinely stubs
+(Vanilla Hair Remake has a four-vertex `hair01.tri` beside a 4014-vertex
+`hair01.nif`) and a morph built from one matches nothing while reporting
+success.
+
+Useful options:
+
+| flag | when |
+|---|---|
+| `--tag` | the short name used in filenames; defaults to the source folder's |
+| `--part` | part type for meshes no plugin declares (`hair`, `facialhair`, `eyebrows`, …) |
+| `--default-sex` | only for a mod that is wholly one sex, such as a beard pack |
+| `--unclassified-both` | ship genuinely ambiguous parts for both sexes rather than skipping them |
+| `--dry-run` | measure and report without writing |
+| `--female-ref` / `--male-ref` | name the reference heads instead of discovering them |
+
+Read **Verified** in the output before trusting a run: it says how many of the
+shipped shapes match a set the plugin would actually find. See
+[docs/headparts.md](docs/headparts.md) for what every reported number means.
+
+### TRI mode
+
+`--mode tri` is the older behaviour: it transfers the morphs into the `.tri`
+files a mod already ships, which is what the plugin needs when it is configured
+with `Backend=racemenu`. It can only reach headparts that already have a chargen
+TRI, so it is no longer the default.
 
 ## Development
 
@@ -193,6 +226,22 @@ dist\MPPatcher.exe
 The spec is intentionally portable and does not require a machine-specific
 icon path. Build artifacts are ignored by Git, so `build/` and `dist/` can be
 deleted or rebuilt at any time.
+
+### Native binaries deployed beside the exe
+
+Two native binaries ship next to `MPPatcher.exe` rather than inside it, so
+either can be replaced without rebuilding the Python side:
+
+| binary | needed by |
+|---|---|
+| `mppatcher-cli.exe` | the outfit pipeline |
+| `nifdump.exe` | Headparts library mode |
+
+Both come from the same CMake project. `nifdump.exe` is resolved from the exe's
+own directory first, then its parent, then the `MPP_NIFDUMP` environment
+variable — the same order `mppatcher-cli.exe` uses, which matters under Mod
+Organizer because its virtual file system hooks directory enumeration but not
+the stat family.
 
 The native `mppatcher-cli.exe` and the optional `MPPatcher-Drape` runtime are
 separate components. They must be supplied beside the packaged application

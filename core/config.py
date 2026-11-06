@@ -24,37 +24,11 @@ _BS_MARKERS = ("OutfitStudio x64.exe", "OutfitStudio.exe", "SliderGroups", "Slid
 # by os.listdir / os.scandir) but NOT the stat family (GetFileAttributesW, used
 # by os.path.isdir / exists / isfile). So we must never use the stat family on
 # VFS paths — only enumeration. Confirmed empirically via diagnostics.
-
-def vfs_isdir(path: str) -> bool:
-    """True if `path` is an enumerable directory (works through usvfs)."""
-    if not path:
-        return False
-    try:
-        os.listdir(path)
-        return True
-    except OSError:
-        return False
-
-
-def vfs_listdir(path: str) -> list[str]:
-    try:
-        return os.listdir(path)
-    except OSError:
-        return []
-
-
-def vfs_find(folder: str, *names: str) -> str:
-    """Return full path of the first `name` present in `folder` (case-insensitive),
-    located via enumeration. Returns '' if none found."""
-    entries = vfs_listdir(folder)
-    if not entries:
-        return ""
-    low = {e.lower(): e for e in entries}
-    for n in names:
-        actual = low.get(n.lower())
-        if actual:
-            return os.path.join(folder, actual)
-    return ""
+#
+# They live in core.vfs, which imports no Qt, so the command-line paths can use
+# them without dragging PySide6 in for the QSettings object below. Re-exported
+# here because this is where callers have always found them.
+from core.vfs import vfs_find, vfs_isdir, vfs_listdir  # noqa: E402,F401
 
 
 def _looks_like_bodyslide(path: str) -> bool:

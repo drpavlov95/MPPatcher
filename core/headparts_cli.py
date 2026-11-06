@@ -31,6 +31,7 @@ from core.headpart_patcher import discover_references, patch_headparts
 from core.headpart_sources import discover, stage_archive_nifs
 from core.nif_geometry import NifdumpMissing, dump_tree, find_nifdump, read_geometries
 from core.source_staging import StagedSource, find_tri_root
+from core.vfs import app_directory
 
 PART_CHOICES = ("misc", "face", "eyes", "hair", "facialhair", "scar",
                 "eyebrows")
@@ -154,7 +155,7 @@ def _tally(report) -> dict[str, int]:
 
 
 def _run_library(args) -> int:
-    exe = args.nifdump or find_nifdump(os.path.dirname(os.path.abspath(__file__)))
+    exe = args.nifdump or find_nifdump()
     if not exe:
         print("[ERROR] nifdump was not found. Headpart geometry can only be "
               "read from the mod's NIFs, and reading the .tri files a mod "
@@ -168,8 +169,11 @@ def _run_library(args) -> int:
     with StagedSource(args.source, kind) as staged:
         refs = (args.female_ref, args.male_ref)
         if not all(refs):
-            refs = discover_references(str(staged.root)) or discover_references(
-                os.path.dirname(os.path.abspath(__file__)))
+            # The mod itself first, for a tree that carries its own references,
+            # then the install — app_directory, never dirname(__file__), which
+            # inside a frozen bundle is a temporary extraction folder.
+            refs = (discover_references(str(staged.root))
+                    or discover_references(app_directory()))
         if not refs:
             print("[ERROR] Could not find Physiques of Skyrim "
                   "FACE_FemaleHead.tri and FACE_MaleHead.tri in the active "

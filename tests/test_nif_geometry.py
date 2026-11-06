@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from core import vfs
 from core.nif_geometry import (
     DumpRun, NifdumpMissing, dump_tree, find_nifdump, read_geometries,
 )
@@ -82,6 +83,39 @@ class FindNifdumpTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("MPP_NIFDUMP", None)
                 self.assertEqual(find_nifdump(folder), "")
+
+    def test_a_frozen_build_searches_beside_its_own_executable(self):
+        # The bug this pins: inside a PyInstaller bundle __file__ points at the
+        # temporary extraction directory, not at the exe. A caller that passed
+        # dirname(__file__) searched the wrong tree and reported nifdump missing
+        # while it sat right beside MPPatcher.exe.
+        with tempfile.TemporaryDirectory() as folder:
+            app_dir = os.path.join(folder, "tools", "MPPatcher")
+            beside = _touch(os.path.join(app_dir, "nifdump.exe"))
+            # Stand in for the PyInstaller extraction directory that
+            # dirname(__file__) would have resolved to. nifdump is not in it.
+            extraction = os.path.join(folder, "_MEI123456", "core")
+            os.makedirs(extraction)
+            _touch(os.path.join(folder, "_MEI123456", "decoy.txt"))
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("MPP_NIFDUMP", None)
+                with mock.patch.object(sys, "frozen", True, create=True), \
+                     mock.patch.object(sys, "executable",
+                                       os.path.join(app_dir, "MPPatcher.exe")), \
+                     mock.patch.object(vfs, "__file__",
+                                       os.path.join(extraction, "vfs.py")):
+                    self.assertEqual(find_nifdump(), beside)
+
+    def test_an_unfrozen_run_uses_the_repository_root_not_the_package_dir(self):
+        self.assertEqual(vfs.app_directory(), ROOT)
+
+    def test_an_unfrozen_run_searches_the_project_root(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MPP_NIFDUMP", None)
+            with mock.patch.object(sys, "frozen", False, create=True):
+                # The repository root holds no nifdump.exe, so this is '' rather
+                # than an exception — and it must not look inside core/.
+                self.assertEqual(find_nifdump(), "")
 
 
 class DumpTreeTests(unittest.TestCase):

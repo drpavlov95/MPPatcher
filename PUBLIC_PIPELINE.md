@@ -21,11 +21,23 @@ from `RM_Thin`.
 
 ## Headparts mode
 
-The GUI also accepts a local folder or ZIP containing headpart `.tri` files.
-Headparts mode uses the current Physiques of Skyrim references
-`FACE_FemaleHead.tri` and `FACE_MaleHead.tri` and transfers
-`RLY_Heavy`, `RLY_Muscular` and `RLY_Thin` while preserving the source folder
-layout in the output. The references are discovered from the active Data/VFS
-tree (`SKSE/Plugins/MPF/morphs`). This is the runtime TRI transfer path; NIF
-geometry generation for new hair meshes remains the separate FaceMorphsPatcher
-authoring workflow.
+The GUI also accepts a local folder or ZIP holding a headpart mod. Headparts
+mode reads the mod's **NIFs** — loose, or out of its BSAs — and writes an MPF
+morph library: one minimal TRI per distinct geometry plus a `[[sets]]` manifest,
+under `SKSE/Plugins/MPF/morphs` in the output. That is what the plugin reads
+under its default `Backend=shared`, and the only artifact that can serve a mod
+shipping no `.tri`.
+
+Sex and part type come from the mod's own `HDPT` records; the path and filename
+rules only answer for meshes no plugin declares, and anything still undecided is
+reported rather than guessed. Geometry is read through `nifdump.exe`, which must
+ship beside `MPPatcher.exe`; its absence stops the run rather than falling back
+to the stub TRIs mods commonly ship beside real meshes.
+
+The reference heads `FACE_FemaleHead.tri` and `FACE_MaleHead.tri` are discovered
+from the active Data/VFS tree (`SKSE/Plugins/MPF/morphs`). Deltas are sampled by
+surface wrap, and every run ends by replaying the plugin's own matching over the
+library it just wrote — a shape left unmatched fails the run.
+
+`--mode tri` keeps the previous behaviour, transferring into the `.tri` files a
+mod already ships, for installations configured with `Backend=racemenu`.
