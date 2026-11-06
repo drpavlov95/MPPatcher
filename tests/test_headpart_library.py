@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -19,12 +20,13 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.headpart_library import (
-    DEFAULT_CLUSTER_LIMIT, HEAD_OFFSET, MIN_VERTS, MORPHS, SAME_MESH_LIMIT,
-    ShapeInput, centred_mean_distance, cluster_geometries,
-    load_head_reference, pick_frame, reject_reason, verify_against_clusters,
+    DEFAULT_CLUSTER_LIMIT, DEFAULT_PRESET, HEAD_OFFSET, MIN_VERTS, MORPHS,
+    SAME_MESH_LIMIT, ShapeInput, WrapPreset, build_set, centred_mean_distance,
+    cluster_geometries, load_head_reference, minimal_tri, pick_frame,
+    reject_reason, verify_against_clusters,
 )
 from fmp.morphs import make_morph
-from fmp.tri import TriFile, write_tri
+from fmp.tri import TriFile, read_tri, write_tri
 
 
 def _grid(n: int = 20, *, scale: float = 1.0, seed: int = 0) -> np.ndarray:
@@ -347,6 +349,114 @@ class PickFrameTests(unittest.TestCase):
             choice = pick_frame(self._ref(folder),
                                 self._near_surface(offset=30.0))
             self.assertGreater(choice.contact_distance, 14.0)
+
+
+class BuildSetTests(unittest.TestCase):
+    """The bytes the plugin will read, and the field it will apply."""
+
+    # A reference whose RLY_Heavy moves every vertex exactly 1.0 along z, so a
+    # wrapped delta is readable as a weight rather than as a shape.
+    MORPHS_IN = [("RLY_Heavy", 1.0), ("RLY_Muscular", 2.0), ("RLY_Thin", 3.0)]
+
+    def _ref(self, folder):
+        return load_head_reference(
+            _write_reference(folder, "ref.tri", self.MORPHS_IN), "female")
+
+    def _cluster(self, verts, *, part="hair"):
+        return cluster_geometries([_shape("a.nif", verts, part=part)])[0]
+
+    def _above(self, offset: float, n: int = 12):
+        rng = np.random.default_rng(11)
+        xy = rng.uniform(-4.0, 4.0, size=(n, 2))
+        return np.column_stack([xy, np.full(n, HEAD_OFFSET[2] + offset)])
+
+    def _build(self, folder, verts):
+        ref = self._ref(folder)
+        return ref, build_set(ref, self._cluster(verts),
+                              preset=DEFAULT_PRESET,
+                              frame=pick_frame(ref, verts))
+
+    def test_the_default_preset_carries_the_measured_falloff_numbers(self):
+        self.assertEqual(
+            (DEFAULT_PRESET.falloff, DEFAULT_PRESET.falloff_inner,
+             DEFAULT_PRESET.smooth), (14.0, 4.0, 0))
+
+    def test_a_minimal_tri_round_trips_with_no_faces(self):
+        verts = _grid(30)
+        back = read_tri(write_tri(minimal_tri(verts)))
+        self.assertEqual(back.vertex_count, 30)
+        self.assertEqual(len(back.faces), 0)
+        np.testing.assert_allclose(back.verts, verts.astype("<f4"))
+
+    def test_declaring_no_faces_is_what_makes_the_round_trip_possible(self):
+        # Pins the codec constraint minimal_tri is built around: read_tri
+        # always consumes polyTris * 12 bytes of UV faces, so a TriFile written
+        # from scratch WITH faces and no UV-face block cannot be read back.
+        # Nothing in this pipeline writes one — this test is why.
+        from fmp.tri import TriError
+        faced = minimal_tri(_grid(30))
+        faced.faces = np.asarray([(0, 1, 2)], dtype="<u4")
+        with self.assertRaises(TriError):
+            read_tri(write_tri(faced))
+
+    def test_a_built_set_carries_exactly_the_three_morphs_in_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _ref, built = self._build(folder, self._above(0.03))
+            self.assertEqual(read_tri(built.data).morph_names(), list(MORPHS))
+
+    def test_a_built_set_keeps_the_shape_own_base_vertices(self):
+        # The plugin matches on these, so they must be the mesh as authored.
+        verts = self._above(0.03)
+        with tempfile.TemporaryDirectory() as folder:
+            _ref, built = self._build(folder, verts)
+            np.testing.assert_allclose(read_tri(built.data).verts,
+                                       verts.astype("<f4"))
+
+    def test_a_vertex_lying_on_the_surface_keeps_the_full_delta(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _ref, built = self._build(folder, self._above(0.03))
+            heavy = [m for m in read_tri(built.data).morphs
+                     if m.name == "RLY_Heavy"][0]
+            magnitudes = np.linalg.norm(heavy.deltas(), axis=1)
+            np.testing.assert_allclose(magnitudes, 1.0, atol=1e-3)
+
+    def test_a_vertex_beyond_the_falloff_is_zeroed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _ref, built = self._build(folder, self._above(20.0))
+            heavy = [m for m in read_tri(built.data).morphs
+                     if m.name == "RLY_Heavy"][0]
+            self.assertEqual(float(np.abs(heavy.deltas()).max()), 0.0)
+
+    def test_a_preset_with_no_falloff_carries_the_delta_out_to_any_distance(self):
+        free = WrapPreset("none", falloff=None, falloff_inner=0.0, smooth=0)
+        verts = self._above(20.0)
+        with tempfile.TemporaryDirectory() as folder:
+            ref = self._ref(folder)
+            built = build_set(ref, self._cluster(verts), preset=free,
+                              frame=pick_frame(ref, verts))
+            heavy = [m for m in read_tri(built.data).morphs
+                     if m.name == "RLY_Heavy"][0]
+            self.assertGreater(float(np.abs(heavy.deltas()).max()), 0.9)
+
+    def test_the_metrics_report_the_wrap_distance_and_peak_delta(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _ref, built = self._build(folder, self._above(0.5))
+            for key in ("wrap_dist_p50", "wrap_dist_max", "delta_max"):
+                self.assertIn(key, built.metrics)
+            self.assertAlmostEqual(built.metrics["wrap_dist_p50"], 0.5, places=3)
+
+    def test_a_vertex_count_mismatch_in_the_readback_raises(self):
+        # The guard that makes "a file MPF cannot parse is worse than no file"
+        # true: the bytes are read back before the run is called a success.
+        verts = self._above(0.03)
+        wrong = write_tri(minimal_tri(_grid(99)))
+        with tempfile.TemporaryDirectory() as folder:
+            ref = self._ref(folder)
+            with mock.patch("core.headpart_library.write_tri",
+                            return_value=wrong):
+                with self.assertRaisesRegex(ValueError, "99"):
+                    build_set(ref, self._cluster(verts), preset=DEFAULT_PRESET,
+                              frame=pick_frame(ref, verts))
 
 
 class RejectTests(unittest.TestCase):

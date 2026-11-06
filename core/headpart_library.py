@@ -21,8 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
-from fmp.morphs import find_morph
-from fmp.tri import read_tri
+from fmp.morphs import find_morph, make_morph
+from fmp.tri import TriFile, read_tri, write_tri
 
 MORPHS = ("RLY_Heavy", "RLY_Muscular", "RLY_Thin")
 
@@ -32,6 +32,34 @@ MORPHS = ("RLY_Heavy", "RLY_Muscular", "RLY_Thin")
 # 83 shapes at head height and 94 at the origin. The frames are ~120 units
 # apart, so which one a shape is in is measured per shape, never declared.
 HEAD_OFFSET = np.array([0.0, -1.633, 120.555])
+
+
+@dataclass(frozen=True)
+class WrapPreset:
+    """How far from the reference surface a delta survives."""
+
+    name: str
+    falloff: float | None
+    falloff_inner: float
+    smooth: int = 0
+
+
+# One preset for every part. An earlier design chose between this and a
+# falloff-free variant from the HDPT part type; measurement killed that. For the
+# Even More Brows meshes, which sit 0.03 units off the surface, the two produce
+# bit-identical deltas; for BG3's gortash hair (median 1.02 off the skull) they
+# differ by 0.0093 units. And the mapping was unsafe: BG3 declares its
+# hair-*highlight* mesh as part "misc", which would have handed the on-skin
+# variant to geometry standing off the skull exactly like the hair it belongs
+# to. The part type is a label, not a measurement of standoff.
+#
+# Full delta out to 4.0 units, smoothly to zero at 14.0. Hair within a unit or
+# two of the skin should follow it completely, including being pushed out of a
+# neck that just got thicker; a strand hanging in the air well away from the
+# body has nothing to follow, and carrying the skin's displacement out there
+# only distorts the silhouette.
+DEFAULT_PRESET = WrapPreset("default", falloff=14.0, falloff_inner=4.0,
+                            smooth=0)
 
 # The plugin's own acceptance threshold.
 SAME_MESH_LIMIT = 3.0
@@ -188,6 +216,82 @@ def pick_frame(ref: HeadReference, verts: np.ndarray, *,
             best = FrameChoice(surface, name, median,
                                float(np.percentile(dist, 5)))
     return best
+
+
+def minimal_tri(verts: np.ndarray) -> TriFile:
+    """A TRI carrying nothing but base vertices — faces and UVs declared absent.
+
+    Nothing reads these files except MPF, which keeps only the base vertices
+    (to match) and the deltas (to apply), and skips every other block by its
+    declared size. Carrying faces would add megabytes per download for data no
+    reader looks at; the cost here is ~30 bytes per vertex, 12 for the position
+    and 6 for each of the three morphs.
+
+    Declaring ``polyTris`` 0 also sidesteps a sharp edge in the codec: the
+    reader always consumes ``polyTris * 12`` bytes of UV faces, so a file
+    written with faces but no UV-face block cannot be read back.
+    """
+    return TriFile(
+        vertex_count=len(verts),
+        verts=np.ascontiguousarray(verts, dtype="<f4"),
+        faces=np.zeros((0, 3), dtype="<u4"),
+        polyquads=0, unk2=0, unk3=0, uv_verts=0, flags=0,
+        num_mods=0, mod_verts=0, unk7=0, unk8=0, unk9=0, unk10=0)
+
+
+@dataclass
+class BuiltSet:
+    """The bytes of one morph set, and what measuring it produced."""
+
+    data: bytes
+    metrics: dict[str, float]
+
+
+def build_set(ref: HeadReference, cluster: GeometryCluster, *,
+              preset: WrapPreset = DEFAULT_PRESET,
+              frame: FrameChoice | None = None) -> BuiltSet:
+    """Wrap the reference's three fields onto one geometry and serialise it.
+
+    The field is sampled by surface wrap rather than by nearest vertex. A hair
+    mesh stands 1.5 to 1.8 units off the skull, and neighbouring hair vertices
+    can land on different head vertices carrying unrelated deltas — which shears
+    the mesh along the boundary between them. Wrapping asks for the closest
+    point on the reference *surface* and interpolates across the triangle that
+    contains it, so the field is continuous wherever the surface is.
+    """
+    # Imported here rather than at module scope: fmp.wrap pulls in scipy, and
+    # the clustering and classification half of this module is what the GUI's
+    # scan uses. A heavy import on the scan path would be paid for nothing.
+    from fmp.wrap import wrap_deltas
+
+    surface = frame.surface if frame is not None else ref.surface_origin
+    tri = minimal_tri(cluster.verts)
+    metrics: dict[str, float] = {}
+
+    for name in MORPHS:
+        deltas, measured = wrap_deltas(
+            surface, ref.faces, ref.deltas[name], cluster.verts,
+            falloff=preset.falloff, falloff_inner=preset.falloff_inner,
+            smooth_iterations=preset.smooth,
+            tgt_faces=(cluster.tris if preset.smooth > 0
+                       and len(cluster.tris) else None))
+        tri.morphs.append(make_morph(name, deltas))
+        if name == MORPHS[0]:
+            metrics.update(measured)
+
+    data = write_tri(tri)
+    # Read it straight back. A file MPF cannot parse is worse than no file, and
+    # the reader here implements the same layout as the plugin's.
+    check = read_tri(data, source=f"{cluster.representative} set")
+    if check.vertex_count != len(cluster.verts):
+        raise ValueError(
+            f"set for {cluster.representative} read back with "
+            f"{check.vertex_count} vertices, not {len(cluster.verts)}")
+    if check.morph_names() != list(MORPHS):
+        raise ValueError(
+            f"set for {cluster.representative} read back with morphs "
+            f"{check.morph_names()}, not {list(MORPHS)}")
+    return BuiltSet(data=data, metrics=metrics)
 
 
 def reject_reason(shape: ShapeInput) -> str | None:
