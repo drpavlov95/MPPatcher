@@ -1,0 +1,169 @@
+"""Coverage for the headparts CLI surface.
+
+Two modes share one entry point, and which one is the default matters: library
+mode is the only one that can serve a mod shipping no `.tri` at all, and it is
+what the plugin reads by default. TRI mode remains for `Backend=racemenu`.
+
+The absent-nifdump path is tested here because it is the one place where a quiet
+fallback would be catastrophic: reading the mod's stub TRIs instead would build
+morph sets that match no live mesh and report success.
+"""
+import os
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from core.headparts_cli import build_headparts_parser, run_headparts
+
+
+def _parse(argv):
+    return build_headparts_parser().parse_args(argv)
+
+
+BASE = ["--headparts", "--source", "s", "--output-dir", "o"]
+
+
+class ParserTests(unittest.TestCase):
+    def test_library_is_the_default_mode(self):
+        self.assertEqual(_parse(BASE).mode, "library")
+
+    def test_tri_mode_is_selectable(self):
+        self.assertEqual(_parse(BASE + ["--mode", "tri"]).mode, "tri")
+
+    def test_an_unknown_mode_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr"):
+                _parse(BASE + ["--mode", "racemenu"])
+
+    def test_tri_mode_still_accepts_only_missing_and_filter_file(self):
+        args = _parse(BASE + ["--mode", "tri", "--only-missing",
+                              "--filter-file", "f.txt"])
+        self.assertTrue(args.only_missing)
+        self.assertEqual(args.filter_file, "f.txt")
+
+    def test_library_mode_accepts_tag_part_default_sex_and_cluster_limit(self):
+        args = _parse(BASE + ["--tag", "BOP", "--part", "facialhair",
+                              "--default-sex", "male", "--cluster-limit", "2.5",
+                              "--unclassified-both"])
+        self.assertEqual(args.tag, "BOP")
+        self.assertEqual(args.part, "facialhair")
+        self.assertEqual(args.default_sex, "male")
+        self.assertEqual(args.cluster_limit, 2.5)
+        self.assertTrue(args.unclassified_both)
+
+    def test_the_falloff_numbers_default_to_the_measured_ones(self):
+        args = _parse(BASE)
+        self.assertEqual((args.falloff, args.falloff_inner), (14.0, 4.0))
+
+    def test_the_falloff_can_be_disabled(self):
+        self.assertEqual(_parse(BASE + ["--falloff", "0"]).falloff, 0.0)
+
+    def test_a_default_sex_outside_the_two_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr"):
+                _parse(BASE + ["--default-sex", "both"])
+
+    def test_source_and_output_dir_are_required(self):
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr"):
+                _parse(["--headparts"])
+
+    def test_an_explicit_nifdump_path_is_accepted(self):
+        self.assertEqual(_parse(BASE + ["--nifdump", "x.exe"]).nifdump, "x.exe")
+
+
+class TagDefaultTests(unittest.TestCase):
+    def test_the_tag_defaults_to_the_sanitised_source_basename(self):
+        from core.headparts_cli import default_tag
+        self.assertEqual(default_tag(r"E:\mods\BG3 hairs 1.1"), "BG3hairs11")
+        self.assertEqual(default_tag(r"E:\mods\Beards of Power.zip"),
+                         "BeardsofPower")
+
+    def test_a_trailing_separator_does_not_produce_an_empty_tag(self):
+        from core.headparts_cli import default_tag
+        self.assertEqual(default_tag(r"E:\mods\Apachii Sky Hair SSE" + os.sep),
+                         "ApachiiSkyHairSSE")
+
+
+class FilterSelectionTests(unittest.TestCase):
+    """One filter file has to work for both modes."""
+
+    def setUp(self):
+        from core.headparts_cli import _is_selected
+        self.selected = _is_selected
+
+    def test_no_filter_selects_everything(self):
+        self.assertTrue(self.selected(None, "meshes\\a.nif", "Hair"))
+
+    def test_a_bare_path_selects_every_shape_in_that_nif(self):
+        chosen = {"meshes/a.nif"}
+        self.assertTrue(self.selected(chosen, "meshes\\a.nif", "Hair"))
+        self.assertTrue(self.selected(chosen, "meshes\\a.nif", "Scalp"))
+
+    def test_a_shape_qualified_entry_selects_only_that_shape(self):
+        chosen = {"meshes/a.nif#Hair"}
+        self.assertTrue(self.selected(chosen, "meshes\\a.nif", "Hair"))
+        self.assertFalse(self.selected(chosen, "meshes\\a.nif", "Scalp"))
+
+    def test_an_unlisted_path_is_not_selected(self):
+        self.assertFalse(self.selected({"meshes/b.nif"}, "meshes\\a.nif", "H"))
+
+
+class NifdumpMissingTests(unittest.TestCase):
+    def test_library_mode_stops_with_an_actionable_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "mod")
+            os.makedirs(source)
+            out = os.path.join(folder, "out")
+            with mock.patch("core.headparts_cli.find_nifdump", return_value=""):
+                with mock.patch("sys.stdout"):
+                    code = run_headparts(
+                        ["--headparts", "--source", source,
+                         "--output-dir", out, "--tag", "T"])
+        self.assertEqual(code, 2)
+
+    def test_the_error_names_nifdump_and_the_override(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "mod")
+            os.makedirs(source)
+            printed = []
+            with mock.patch("core.headparts_cli.find_nifdump", return_value=""):
+                with mock.patch("builtins.print",
+                                side_effect=lambda *a, **k: printed.append(
+                                    " ".join(str(x) for x in a))):
+                    run_headparts(["--headparts", "--source", source,
+                                   "--output-dir", os.path.join(folder, "o"),
+                                   "--tag", "T"])
+            text = "\n".join(printed)
+            self.assertIn("nifdump", text)
+            self.assertIn("MPP_NIFDUMP", text)
+
+
+class ReferenceDiscoveryTests(unittest.TestCase):
+    def test_library_mode_stops_when_no_reference_heads_can_be_found(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "mod")
+            os.makedirs(source)
+            printed = []
+            with mock.patch("core.headparts_cli.find_nifdump",
+                            return_value="nifdump.exe"):
+                with mock.patch("core.headparts_cli.discover_references",
+                                return_value=None):
+                    with mock.patch("builtins.print",
+                                    side_effect=lambda *a, **k: printed.append(
+                                        " ".join(str(x) for x in a))):
+                        code = run_headparts(
+                            ["--headparts", "--source", source,
+                             "--output-dir", os.path.join(folder, "o"),
+                             "--tag", "T"])
+            self.assertEqual(code, 2)
+            self.assertIn("FACE_FemaleHead.tri", "\n".join(printed))
+
+
+if __name__ == "__main__":
+    unittest.main()
