@@ -38,7 +38,7 @@ from core.source_staging import (
 )
 from core.drape_runtime import RUNTIME_DIRNAME as DRAPE_RUNTIME_DIRNAME, drape_environment
 from core.output_archive import create_zip_archive
-from core.headpart_patcher import scan_headparts, discover_references, detect_headpart_sex
+from core.headpart_patcher import discover_references
 from core.slider_group_reader import SliderGroup, read_all as read_groups
 from core.automation_xml_writer import detect_gender
 from core.os_runner import OsRunner
@@ -1217,7 +1217,8 @@ class MainWindow(QMainWindow):
         self._refresh_choice_card(self.target_headparts_btn, kind == "headparts")
         if kind == "headparts":
             self.configure_source_status.setText(
-                "Headparts mode patches TRI files with the Physiques of Skyrim head references.")
+                "Headparts mode reads the mod's NIFs and writes a Physiques of "
+                "Skyrim morph library, so mods that ship no .tri still work.")
         else:
             self.configure_source_status.setText(
                 "Outfits and Armors mode uses BodySlide SliderGroups and OSP projects.")
@@ -3252,31 +3253,38 @@ class MainWindow(QMainWindow):
     # ── Groups tree ───────────────────────────────────────────────────
     def _reload_groups(self):
         if self._target_kind == "headparts":
+            from core.headpart_sources import scan_rows
             from core.slider_group_reader import SliderGroup
-            root = find_tri_root(self._source_input_root or self.config.app_dir)
+            root = self._source_input_root or self.config.app_dir
             self._effective_tri_root = str(root)
-            targets = scan_headparts(root)
-            names = [str(p.relative_to(root)) for p in targets]
-            groups = [SliderGroup(name="Headparts (TRI)", members=names)] if names else []
+            # NIFs, not TRIs: a headpart's geometry only exists in its mesh, and
+            # plenty of mods ship no .tri at all. The scan stays file-based —
+            # reading geometry means dumping every mesh in the mod, which is the
+            # run's job, not the scan's.
+            rows = scan_rows(root)
+            names = [row.relpath for row in rows]
+            groups = [SliderGroup(name="Headparts (NIF)", members=names)] if names else []
             self._all_groups = groups
             self._scan_data = {
-                name: OutfitInfo(name=name,
-                                 gender=("HIMBO" if detect_headpart_sex(name) == "male"
-                                         else "3BA" if detect_headpart_sex(name) == "female"
-                                         else "Unknown"),
-                                 body_family=("HIMBO" if detect_headpart_sex(name) == "male"
-                                              else "3BA" if detect_headpart_sex(name) == "female"
-                                              else "Unknown"),
-                                 confidence=("High" if detect_headpart_sex(name) != "unknown"
-                                             else "Unknown"),
-                                 mesh_type="Unknown",
-                                 warnings=([] if detect_headpart_sex(name) != "unknown"
-                                           else ["Headpart sex could not be inferred from the path."]))
-                for name in names
+                row.relpath: OutfitInfo(
+                    name=row.relpath,
+                    # The sex of a headpart, not a body family. The old code put
+                    # "3BA"/"HIMBO" here, which are body reference names and
+                    # meant nothing for a brow.
+                    gender=(row.sex.capitalize() if row.sex else "Unknown"),
+                    body_family=(row.sex.capitalize() if row.sex else "Unknown"),
+                    confidence=row.confidence,
+                    mesh_type=row.part.capitalize(),
+                    warnings=list(row.warnings))
+                for row in rows
             }
             self._rebuild_tree()
             self._update_stats()
-            self.lbl_scan_status.setText(f"{len(names)} headpart TRIs")
+            unresolved = sum(1 for row in rows if row.sex is None)
+            status = f"{len(names)} headpart meshes"
+            if unresolved:
+                status += f" · {unresolved} with no declared sex"
+            self.lbl_scan_status.setText(status)
             self._groups_loaded = True
             return
 
@@ -4379,12 +4387,12 @@ class MainWindow(QMainWindow):
         self.runner.run(cli_exe, args, process_environment)
 
     def _on_headparts_patch(self):
-        """Run the TRI headpart backend through this same packaged executable."""
+        """Run the headpart backend through this same packaged executable."""
         members = [m for group in self._checked_groups() for m in group.members]
         source = self._source_path
         if not source or not members:
             QMessageBox.warning(self, "No headparts selected",
-                                "Select a headpart source and at least one TRI.")
+                                "Select a headpart source and at least one mesh.")
             return
         try:
             out_dir, archive_path = self._prepare_output_destination(
@@ -4405,8 +4413,11 @@ class MainWindow(QMainWindow):
             exe, args = sys.executable, []
         else:
             exe, args = sys.executable, [os.path.abspath(sys.argv[0])]
-        args += ["--headparts", "--source", source, "--output-dir", out_dir,
-                 "--female-ref", refs[0], "--male-ref", refs[1], "--only-missing"]
+        from core.headparts_cli import default_tag
+        args += ["--headparts", "--mode", "library",
+                 "--source", source, "--output-dir", out_dir,
+                 "--tag", default_tag(source),
+                 "--female-ref", refs[0], "--male-ref", refs[1]]
         import tempfile
         filter_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False,
                                                    encoding="utf-8")
@@ -4601,7 +4612,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(100)
             self.lbl_progress_pct.setText("100%")
-            kind = "headpart TRI(s)" if getattr(self, "_headpart_mode_active", False) else "outfit(s)"
+            kind = "headpart mesh(es)" if getattr(self, "_headpart_mode_active", False) else "outfit(s)"
             self._log_success(
                 f"✓ Patching complete — {done} {kind} processed in {t}.")
             self.stat_processed.set_value(str(done))

@@ -20,6 +20,64 @@ from ui.main_window import MainWindow
 from ui.main_window_ui import COL_REVEAL, COL_SMART, COL_OUTPUT
 
 
+class HeadpartScanTests(unittest.TestCase):
+    """The headparts target lists meshes, and says what it resolved."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _scan(self, *relatives, **kwargs):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        for relative in relatives:
+            path = os.path.join(self._tmp.name, relative.replace("/", os.sep))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+        window = MainWindow()
+        self.addCleanup(self._tmp.cleanup)
+        window._target_kind = "headparts"
+        window._source_input_root = self._tmp.name
+        window._reload_groups()
+        return window
+
+    def test_headpart_rows_carry_the_resolved_sex_not_a_body_family(self):
+        window = self._scan("meshes/hair/female/a.nif", "meshes/hair/male/b.nif")
+        genders = {info.gender for info in window._scan_data.values()}
+        self.assertEqual(genders, {"Female", "Male"})
+        self.assertNotIn("3BA", genders)
+        self.assertNotIn("HIMBO", genders)
+
+    def test_the_group_is_named_for_meshes_not_tris(self):
+        window = self._scan("meshes/hair/female/a.nif")
+        self.assertEqual([g.name for g in window._all_groups],
+                         ["Headparts (NIF)"])
+
+    def test_a_mod_that_ships_no_tri_is_still_listed(self):
+        # The whole point: this tree has a mesh and no .tri anywhere.
+        window = self._scan("meshes/actors/character/EMB/FemaleBrows001.nif")
+        self.assertEqual(len(window._scan_data), 1)
+
+    def test_an_unresolved_headpart_row_carries_a_warning_before_the_run(self):
+        window = self._scan("meshes/hair/911.nif")
+        info = next(iter(window._scan_data.values()))
+        self.assertEqual(info.gender, "Unknown")
+        self.assertEqual(info.confidence, "Unknown")
+        self.assertTrue(info.warnings)
+
+    def test_the_status_line_counts_the_meshes_and_the_unresolved(self):
+        window = self._scan("meshes/hair/female/a.nif", "meshes/hair/911.nif")
+        text = window.lbl_scan_status.text()
+        self.assertIn("2 headpart meshes", text)
+        self.assertIn("1 with no declared sex", text)
+
+    def test_the_part_type_is_shown_as_the_mesh_type(self):
+        window = self._scan("meshes/hair/female/a.nif")
+        info = next(iter(window._scan_data.values()))
+        self.assertEqual(info.mesh_type, "Hair")
+
+
 class StateModelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

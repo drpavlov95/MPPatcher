@@ -68,6 +68,66 @@ def discover(root: str) -> HeadpartSource:
     return found
 
 
+CONFIDENCE = {
+    "plugin": "High",       # the game's own record said so
+    "path": "Medium",
+    "filename": "Medium",
+    "paired": "Medium",
+    "default": "Low",       # the operator stated it for the whole mod
+    "unresolved": "Unknown",
+}
+
+
+@dataclass
+class HeadpartRow:
+    """One NIF as the GUI shows it, before any geometry is read."""
+
+    relpath: str
+    sex: str | None
+    sex_source: str
+    part: str
+    confidence: str
+    warnings: list[str] = field(default_factory=list)
+
+
+def scan_rows(root: str, *, default_part: str = "hair",
+              default_sex: str | None = None, hdpt=None) -> list[HeadpartRow]:
+    """What the GUI lists for a headpart source: one row per NIF.
+
+    Deliberately file-based. A vertex count would mean dumping every mesh in
+    the mod, which is the expensive half of a run — Beards of Power spends
+    minutes pulling 182 meshes out of a 911 MB archive — and the scan would pay
+    it again on every rescan. Shape-level detail belongs in the run report.
+
+    Each row says which rule resolved its sex, so a row the patcher will skip
+    is visible before the run instead of appearing as a skip in the log.
+    """
+    from core.headpart_classify import classify, collect_stems
+
+    found = discover(root)
+    if hdpt is None and found.plugins:
+        from fmp.esp import head_parts_by_model
+        hdpt = head_parts_by_model(found.plugins)
+
+    stems = collect_stems(found.loose_nifs)
+    rows = []
+    for relpath in found.loose_nifs:
+        decided = classify(relpath, hdpt=hdpt, stems=stems,
+                           default_sex=default_sex, default_part=default_part)
+        warnings = []
+        if decided.sex is None:
+            warnings.append(
+                "Sex could not be determined from the plugin, the path or the "
+                "filename; this headpart will be skipped unless it is shipped "
+                "for both sexes.")
+        rows.append(HeadpartRow(
+            relpath=relpath, sex=decided.sex, sex_source=decided.sex_source,
+            part=decided.part,
+            confidence=CONFIDENCE.get(decided.sex_source, "Unknown"),
+            warnings=warnings))
+    return rows
+
+
 def _staging_name(archive: str, used: set[str]) -> str:
     """A folder name per archive, kept distinct when two share a stem."""
     stem = os.path.splitext(os.path.basename(archive))[0] or "archive"

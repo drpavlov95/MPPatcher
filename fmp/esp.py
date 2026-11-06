@@ -96,7 +96,8 @@ def _parse_hdpt(data: bytes) -> HeadPart:
 
 def read_head_parts(path: str) -> list[HeadPart]:
     """Every HDPT record in the plugin, in file order."""
-    data = open(path, "rb").read()
+    with open(path, "rb") as handle:
+        data = handle.read()
     out: list[HeadPart] = []
     pos = 0
     n = len(data)

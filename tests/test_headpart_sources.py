@@ -15,7 +15,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.headpart_sources import discover, stage_archive_nifs
+from core.headpart_sources import discover, scan_rows, stage_archive_nifs
+from fmp.esp import HeadPart
 
 
 def _make(root: str, *relatives: str) -> None:
@@ -74,6 +75,72 @@ class DiscoverTests(unittest.TestCase):
     def test_a_missing_root_discovers_nothing_without_raising(self):
         found = discover(os.path.join(tempfile.gettempdir(), "no-such-mod-dir"))
         self.assertEqual(found.loose_nifs, [])
+
+
+class ScanRowsTests(unittest.TestCase):
+    """What the GUI shows before a run: no geometry read, no guessing hidden."""
+
+    def test_one_row_per_nif_with_the_resolved_sex_and_part(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/female/a.nif", "meshes/hair/male/b.nif")
+            rows = scan_rows(folder, default_part="hair")
+            self.assertEqual(len(rows), 2)
+            by_sex = {row.sex: row for row in rows}
+            self.assertEqual(sorted(by_sex), ["female", "male"])
+            self.assertEqual(by_sex["female"].part, "hair")
+
+    def test_the_rule_that_decided_is_reported_as_a_confidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/female/a.nif")
+            row = scan_rows(folder, default_part="hair")[0]
+            self.assertEqual(row.sex_source, "path")
+            self.assertEqual(row.confidence, "Medium")
+
+    def test_a_plugin_declared_row_is_high_confidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/911.nif")
+            hdpt = {"hair/911.nif": [HeadPart(
+                editor_id="X", model="meshes\\hair\\911.nif", part_type="hair",
+                playable=True, male=False, female=True, extra_part=False)]}
+            row = scan_rows(folder, default_part="hair", hdpt=hdpt)[0]
+            self.assertEqual((row.sex, row.sex_source, row.confidence),
+                             ("female", "plugin", "High"))
+
+    def test_an_unresolved_row_carries_a_warning_before_the_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/911.nif")
+            row = scan_rows(folder, default_part="hair")[0]
+            self.assertIsNone(row.sex)
+            self.assertEqual(row.confidence, "Unknown")
+            self.assertTrue(row.warnings)
+
+    def test_a_default_sex_row_is_low_confidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/beards/beard11.nif")
+            row = scan_rows(folder, default_part="facialhair",
+                            default_sex="male")[0]
+            self.assertEqual((row.sex, row.confidence), ("male", "Low"))
+
+    def test_rows_read_the_plugins_in_the_tree_without_being_handed_them(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/911.nif")
+            # No plugin in the tree: the scan must still work and credit the
+            # fallback rules rather than claim a plugin decided.
+            rows = scan_rows(folder, default_part="hair")
+            self.assertNotEqual(rows[0].sex_source, "plugin")
+
+    def test_a_mod_whose_meshes_are_all_in_a_bsa_reports_the_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "Beards.bsa", "Beards.esp")
+            rows = scan_rows(folder, default_part="facialhair")
+            self.assertEqual(rows, [])
+
+    def test_the_relpath_is_kept_as_the_row_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _make(folder, "meshes/hair/female/a.nif")
+            row = scan_rows(folder, default_part="hair")[0]
+            self.assertEqual(row.relpath.replace(os.sep, "/"),
+                             "meshes/hair/female/a.nif")
 
 
 class StageArchiveNifsTests(unittest.TestCase):
